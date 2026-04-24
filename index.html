@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Bee Telegram Bot - Мониторинг</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #333; margin-bottom: 20px; border-bottom: 2px solid #f0a500; padding-bottom: 10px; }
+        .section { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .section h2 { color: #666; margin-bottom: 15px; font-size: 18px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #eee; }
+        th { background: #f8f9fa; font-weight: 600; color: #555; }
+        tr:hover { background: #fafafa; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+        .badge-bot { background: #e8f5e9; color: #2e7d32; }
+        .badge-user { background: #e3f2fd; color: #1565c0; }
+        .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .status-online { background: #4caf50; box-shadow: 0 0 4px #4caf50; }
+        .refresh-btn { padding: 8px 16px; background: #f0a500; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 15px; color: white; font-weight: 500; }
+        .refresh-btn:hover { background: #e09600; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🐝 Bee Telegram Bot - Мониторинг</h1>
+        
+        <div class="section">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2>👥 Пользователи</h2>
+                <button class="refresh-btn" onclick="refreshData()">Обновить</button>
+            </div>
+            <div style="margin-bottom: 10px;">
+                <span class="status status-online"></span> Бот работает
+            </div>
+            <table id="usersTable">
+                <thead>
+                    <tr><th>ID</th><th>Telegram ID</th><th>Имя</th><th>Username</th><th>Тип</th><th>Последнее сообщение</th></tr>
+                </thead>
+                <tbody id="usersBody"></tbody>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2>📊 Последние расчеты</h2>
+            <table id="paramsTable">
+                <thead><tr><th>ID</th><th>Chat ID</th><th>Тип</th><th>Яйцо/личинка</th><th>Дата</th><th>Уведомления</th></tr></thead>
+                <tbody id="paramsBody"></tbody>
+            </table>
+        </div>
+    </div>
+    
+    <script>
+        async function refreshData() {
+            try {
+                // Загрузка пользователей
+                const users = await window.electronAPI.getUsers();
+                const usersBody = document.getElementById('usersBody');
+                usersBody.innerHTML = users.map(u => `
+                    <tr>
+                        <td>${u.id}</td>
+                        <td>${u.tg_id}</td>
+                        <td>${u.first_name || ''} ${u.last_name || ''}</td>
+                        <td>${u.username || '-'}</td>
+                        <td><span class="badge ${u.is_bot ? 'badge-bot' : 'badge-user'}">${u.is_bot ? 'Бот' : 'Пользователь'}</span></td>
+                        <td>${u.last_message || '-'}</td>
+                    </tr>
+                `).join('');
+                
+                // Загрузка параметров
+                const params = await window.electronAPI.getParams();
+                const paramsBody = document.getElementById('paramsBody');
+                const eggNames = ['', '1дн яйцо', '2дн яйцо', '3дн яйцо', '1дн личинка', '2дн личинка', '', '', '', 'запечатанный маточник', 'печатка трутня'];
+                paramsBody.innerHTML = params.map(p => `
+                    <tr>
+                        <td>${p.id}</td>
+                        <td>${p.chat_id}</td>
+                        <td>${p.typ === 0 ? '👑 Матка' : '🐝 Трутень'}</td>
+                        <td>${eggNames[p.egg] || p.egg}</td>
+                        <td>${p.dt || '-'}</td>
+                        <td>${p.subscribe === 0 ? '❌ Выкл' : (p.subscribe === 1 ? '📲 День' : '📲 День+1')} ${p.subscribetime || ''}</td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                console.error('Refresh error:', err);
+            }
+        }
+        
+        refreshData();
+        setInterval(refreshData, 10000);
+    </script>
+</body>
+</html>

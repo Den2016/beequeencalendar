@@ -1,0 +1,31 @@
+{
+  "name": "bee-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for beekeeping queen breeding calendar",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "bot": "node bot.js",
+    "dev": "concurrently \"npm run bot\" \"electron .\""
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "electron": "^27.0.0",
+    "express": "^4.18.2",
+    "node-cron": "^3.0.3",
+    "node-telegram-bot-api": "^0.61.0",
+    "sqlite3": "^6.0.1"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron-rebuild": "^3.2.9"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "beekeeping",
+    "calendar"
+  ],
+  "author": "",
+  "license": "GPL-3.0"
+}

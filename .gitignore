@@ -1,0 +1,52 @@
+
+php/
+# Зависимости
+node_modules/
+package-lock.json
+yarn.lock
+
+# Файлы окружения
+.env
+.env.local
+.env.*.local
+
+# База данных
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+*.sqlite
+*.sqlite3
+
+# Логи
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+
+# Electron
+dist/
+out/
+release/
+
+# Редакторы
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Временные файлы
+tmp/
+temp/
+*.tmp
+
+# Сборки
+build/
+dist-electron/
+
+# Пользовательские данные
+user-data/
