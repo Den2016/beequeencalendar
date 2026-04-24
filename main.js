@@ -1,4 +1,4 @@
-const { app, Tray, Menu, BrowserWindow, nativeImage } = require('electron');
+const { app, Tray, Menu, BrowserWindow } = require('electron');
 const path = require('path');
 const { models } = require('./database');
 
@@ -9,13 +9,13 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Подключаем бота (он будет работать в том же процессе)
+// Подключаем бота и планировщик
 const bot = require('./bot');
+const { initScheduler } = require('./scheduler');
 
 function createTray() {
-
-    
-     tray = new Tray(path.join(__dirname, 'assets', 'icon.ico')); // Добавьте иконку
+    // Используем вашу иконку из папки assets
+    tray = new Tray(path.join(__dirname, 'assets', 'icon.ico'));
     
     const contextMenu = Menu.buildFromTemplate([
         { label: '📊 Показать мониторинг', click: showWindow },
@@ -73,9 +73,18 @@ app.whenReady().then(() => {
         res.json(params);
     });
     
+    expressApp.get('/api/notifications', async (req, res) => {
+        const { dbAsync } = require('./database');
+        const notifications = await dbAsync.all('SELECT * FROM beesubscribes WHERE sent = 0 ORDER BY dt ASC');
+        res.json(notifications);
+    });
+    
     expressApp.listen(port, () => {
         console.log(`📊 Monitor API running on http://localhost:${port}`);
     });
+    
+    // Инициализируем планировщик уведомлений
+    initScheduler(bot);
     
     console.log('🐝 Bee Telegram Bot started!');
 });

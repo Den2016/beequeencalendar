@@ -50,46 +50,74 @@
                 <tbody id="paramsBody"></tbody>
             </table>
         </div>
+<div class="section">
+    <h2>🔔 Ожидающие уведомления</h2>
+    <table id="notificationsTable">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Chat ID</th>
+                <th>Дата/время</th>
+                <th>Тип</th>
+                <th>Событие</th>
+            </tr>
+        </thead>
+        <tbody id="notificationsBody"></tbody>
+    </table>
+</div>        
     </div>
     
     <script>
-        async function refreshData() {
-            try {
-                // Загрузка пользователей
-                const users = await window.electronAPI.getUsers();
-                const usersBody = document.getElementById('usersBody');
-                usersBody.innerHTML = users.map(u => `
-                    <tr>
-                        <td>${u.id}</td>
-                        <td>${u.tg_id}</td>
-                        <td>${u.first_name || ''} ${u.last_name || ''}</td>
-                        <td>${u.username || '-'}</td>
-                        <td><span class="badge ${u.is_bot ? 'badge-bot' : 'badge-user'}">${u.is_bot ? 'Бот' : 'Пользователь'}</span></td>
-                        <td>${u.last_message || '-'}</td>
-                    </tr>
-                `).join('');
-                
-                // Загрузка параметров
-                const params = await window.electronAPI.getParams();
-                const paramsBody = document.getElementById('paramsBody');
-                const eggNames = ['', '1дн яйцо', '2дн яйцо', '3дн яйцо', '1дн личинка', '2дн личинка', '', '', '', 'запечатанный маточник', 'печатка трутня'];
-                paramsBody.innerHTML = params.map(p => `
-                    <tr>
-                        <td>${p.id}</td>
-                        <td>${p.chat_id}</td>
-                        <td>${p.typ === 0 ? '👑 Матка' : '🐝 Трутень'}</td>
-                        <td>${eggNames[p.egg] || p.egg}</td>
-                        <td>${p.dt || '-'}</td>
-                        <td>${p.subscribe === 0 ? '❌ Выкл' : (p.subscribe === 1 ? '📲 День' : '📲 День+1')} ${p.subscribetime || ''}</td>
-                    </tr>
-                `).join('');
-            } catch (err) {
-                console.error('Refresh error:', err);
-            }
+    async function refreshData() {
+        try {
+            // Загрузка пользователей
+            const users = await window.electronAPI.getUsers();
+            const usersBody = document.getElementById('usersBody');
+            usersBody.innerHTML = users.map(u => `
+                <tr>
+                    <td>${u.id}</td>
+                    <td>${u.tg_id}</td>
+                    <td>${u.first_name || ''} ${u.last_name || ''}</td>
+                    <td>${u.username || '-'}</td>
+                    <td><span class="badge ${u.is_bot ? 'badge-bot' : 'badge-user'}">${u.is_bot ? 'Бот' : 'Пользователь'}</span></td>
+                    <td>${u.last_message || '-'}</td>
+                </tr>
+            `).join('');
+            
+            // Загрузка параметров
+            const params = await window.electronAPI.getParams();
+            const paramsBody = document.getElementById('paramsBody');
+            const eggNames = ['', '1дн яйцо', '2дн яйцо', '3дн яйцо', '1дн личинка', '2дн личинка', '', '', '', 'запечатанный маточник', 'печатка трутня'];
+            paramsBody.innerHTML = params.map(p => `
+                <tr>
+                    <td>${p.id}</td>
+                    <td>${p.chat_id}</td>
+                    <td>${p.typ === 0 ? '👑 Матка' : '🐝 Трутень'}</td>
+                    <td>${eggNames[p.egg] || p.egg}</td>
+                    <td>${p.dt || '-'}</td>
+                    <td>${p.subscribe === 0 ? '❌ Выкл' : (p.subscribe === 1 ? '📲 День' : '📲 День+1')} ${p.subscribetime || ''}</td>
+                </tr>
+            `).join('');
+            
+            // Загрузка уведомлений
+            const notifications = await window.electronAPI.getNotifications();
+            const notificationsBody = document.getElementById('notificationsBody');
+            notificationsBody.innerHTML = notifications.map(n => `
+                <tr>
+                    <td>${n.id}</td>
+                    <td>${n.chat_id}</td>
+                    <td>${n.dt || '-'}</td>
+                    <td>${n.tp === 0 ? '📅 По расписанию' : '⏰ Отложенное'}</td>
+                    <td><small>${(n.event || '').substring(0, 80)}${(n.event || '').length > 80 ? '...' : ''}</small></td>
+                </tr>
+            `).join('');
+        } catch (err) {
+            console.error('Refresh error:', err);
         }
-        
-        refreshData();
-        setInterval(refreshData, 10000);
-    </script>
+    }
+    
+    refreshData();
+    setInterval(refreshData, 10000);
+</script>
 </body>
 </html>

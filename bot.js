@@ -30,27 +30,25 @@ const events = {
     11: 'Окончание срока годности трутня для ИО'
 };
 
-// Клавиатуры
-const queenParamsKb = {
-    inline_keyboard: [
-        [{ text: '1дн. яйцо', callback_data: '1de' }, { text: '2дн. яйцо', callback_data: '2de' }, { text: '3дн. яйцо', callback_data: '3de' }],
-        [{ text: '1дн. личинка', callback_data: '1db' }, { text: '2дн. личинка', callback_data: '2db' }],
-        [{ text: 'запечатанный маточник', callback_data: '9de' }]
-    ]
-};
+// ========== ЗНАЧЕНИЯ ПО УМОЛЧАНИЮ ==========
+const DEFAULT_SUBSCRIBE = 1; // 2 = уведомления в день и за день до события (как в PHP)
+const DEFAULT_SUBSCRIBE_TIME = '08:00';
+const DEFAULT_EGG_FOR_FAST = 4; // однодневная личинка для быстрой прививки
 
-const dronParamsKb = {
-    inline_keyboard: [
-        [{ text: '1дн. яйцо', callback_data: 'd1de' }, { text: '2дн. яйцо', callback_data: 'd2de' }, { text: '3дн. яйцо', callback_data: 'd3de' }],
-        [{ text: 'запечатка трутня', callback_data: 'd10de' }]
-    ]
-};
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ДАТАМИ ==========
+function parseDate(dateString) {
+    if (!dateString) return new Date();
+    const parts = dateString.split('-');
+    return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+}
 
-const setupKb = {
-    inline_keyboard: [[{ text: 'Настройка', callback_data: 'setupmessage' }]]
-};
+function formatDateForDB(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
 
-// Вспомогательные функции
 function formatDate(date, withDow = true) {
     const days = ['вск', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
     let formatted = `${date.getDate().toString().padStart(2, '0')}.${(date.getMonth() + 1).toString().padStart(2, '0')}.${date.getFullYear().toString().slice(-2)}`;
@@ -60,182 +58,124 @@ function formatDate(date, withDow = true) {
     return `<b>${formatted}</b>`;
 }
 
-function updateUser(message) {
-    const from = message.from;
-    let user = models.BeeUser.findOne({ tg_id: from.id });
-    if (!user) {
-        models.BeeUser.create({
-            tg_id: from.id,
-            is_bot: from.is_bot ? 1 : 0,
-            first_name: from.first_name || '',
-            last_name: from.last_name || '',
-            username: from.username || '',
-            language_code: from.language_code || ''
-        });
-    } else {
-        models.BeeUser.update(from.id, {});
-    }
-    return models.BeeUser.findOne({ tg_id: from.id });
-}
-
-function addEvent(tg_id, chat_id, msg_id, date, eventId, typ) {
-    const bp = models.BeeParams.findOne({ tg_id, msg_id, chat_id });
-    if (!bp) return;
-
-    const subscribe = bp.subscribe;
-    const subscribetime = bp.subscribetime || '08:00';
-
-    if (subscribe === 1 || subscribe === 2) {
-        const evDate = date.toISOString().split('T')[0];
-        const eventText = typ === 1 
-            ? `Здравствуйте.\nСегодня, ${formatDate(date)} такое событие:\n\n <b>${events[eventId]}</b>`
-            : `Здравствуйте.\nСегодня, ${formatDate(date)} по прививке необходимо сделать/проконтролировать:\n\n <b>${events[eventId]}</b>`;
-        
-        models.BeeSubscribes.create({
-            tg_id, chat_id, msg_id,
-            dt: evDate,
-            eventid: eventId,
-            event: eventText
-        });
-    }
-
-    if (subscribe === 2) {
-        const prevDate = new Date(date);
-        prevDate.setDate(prevDate.getDate() - 1);
-        const eventText = typ === 1
-            ? `Здравствуйте.\nСегодня, ${formatDate(date)}\nНапоминаю, что завтра возникнет такое событие:\n\n <b>${events[eventId]}</b>`
-            : `Здравствуйте.\nСегодня ${formatDate(prevDate)}\nНапоминаю, что завтра, ${formatDate(date)} возникнет следующее событие:\n\n <b>${events[eventId]}</b>`;
-        
-        models.BeeSubscribes.create({
-            tg_id, chat_id, msg_id,
-            dt: prevDate.toISOString().split('T')[0],
-            eventid: null,
-            event: eventText
-        });
-    }
-}
-
-function calcCalendar(msg_id, chat_id, tg_id) {
-    models.BeeSubscribes.deleteAll({ tg_id, msg_id, chat_id });
+// ========== ФУНКЦИИ ДЛЯ РАБОТЫ С КЛАВИАТУРАМИ ==========
+function sendWithKeyboard(chatId, text, keyboard, parseMode = null) {
+    const options = {};
     
-    const bp = models.BeeParams.findOne({ tg_id, msg_id, chat_id });
-    if (!bp) return;
-    
-    const egg = bp.egg;
-    const date = new Date(bp.dt);
-    
-    // Вычисляем дату однодневного яйца
-    let eggDate = new Date(date);
-    if (egg !== 1) {
-        eggDate.setDate(eggDate.getDate() - (egg - 1));
-    }
-    
-    let atext = '';
-    
-    if (bp.typ === 0) {
-        // Вывод маток
-        // Контроль приема (5 дней от яйца)
-        let dt = new Date(eggDate);
-        dt.setDate(dt.getDate() + 5);
-        const controlDate = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 1, bp.typ);
-        
-        // Запечатка (+3 дня)
-        dt.setDate(dt.getDate() + 3);
-        const closeDate = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 2, bp.typ);
-        
-        // Отбор/бигуди (+13 дней от яйца)
-        dt = new Date(eggDate);
-        dt.setDate(dt.getDate() + 13);
-        const takeDate = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 3, bp.typ);
-        
-        // Выход маток (+1 день)
-        dt.setDate(dt.getDate() + 1);
-        const outDateStart = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 4, bp.typ);
-        
-        dt.setDate(dt.getDate() + 1);
-        const outDateEnd = formatDate(dt);
-        
-        // Облет (+21 день от яйца)
-        dt = new Date(eggDate);
-        dt.setDate(dt.getDate() + 21);
-        const flyDateStart = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 5, bp.typ);
-        
-        // Контроль засева (+27 дней)
-        dt = new Date(eggDate);
-        dt.setDate(dt.getDate() + 27);
-        const eggControlDate = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 6, bp.typ);
-        
-        // Формирование текста
-        if (egg === 9) {
-            atext += `${formatDate(eggDate)} яйцо\n\n`;
-        } else {
-            if (egg === 4 || egg === 5) {
-                // Для личинок
-            }
-            atext += `${controlDate} - контроль приема, открытый маточник\n`;
-            atext += `${closeDate} - запечатка маточника\n`;
+    if (keyboard) {
+        if (keyboard.reply_markup) {
+            options.reply_markup = keyboard.reply_markup;
+        } else if (keyboard.inline_keyboard) {
+            options.reply_markup = keyboard;
+        } else if (Array.isArray(keyboard)) {
+            options.reply_markup = { inline_keyboard: keyboard };
         }
-        atext += `${takeDate} - отбор (бигуди)\n`;
-        atext += `${outDateStart} - ${outDateEnd} - выход маток\n`;
-        atext += `${flyDateStart} - облет\n`;
-        atext += `c ${eggControlDate} - контроль засева\n\n`;
-        
-    } else if (bp.typ === 1) {
-        // Вывод трутней
-        let dt = new Date(eggDate);
-        dt.setDate(dt.getDate() + 10);
-        const closeDronDate = formatDate(dt);
-        if (egg !== 10) addEvent(tg_id, chat_id, msg_id, dt, 7, bp.typ);
-        
-        dt.setDate(dt.getDate() + 3);
-        const queenReadyDate = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 8, bp.typ);
-        
-        dt.setDate(dt.getDate() + 11);
-        const dronOutDate = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 9, bp.typ);
-        
-        dt.setDate(dt.getDate() + 11);
-        const dronReadyDate = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 10, bp.typ);
-        
-        dt = new Date(eggDate);
-        dt.setDate(dt.getDate() + 48);
-        const endUsefulDronDate = formatDate(dt);
-        addEvent(tg_id, chat_id, msg_id, dt, 11, bp.typ);
-        
-        if (egg !== 10) atext += `${closeDronDate} - запечатка расплода\n`;
-        atext += `${queenReadyDate} - можно начинать вывод маток\n`;
-        atext += `${dronOutDate} - выход трутня\n`;
-        atext += `${dronReadyDate} - созревание трутня\n`;
-        atext += `${endUsefulDronDate} - трутень далее непригоден для ИО\n\n`;
     }
     
-    // Формируем итоговый текст
-    let text = `Расчет ${bp.typ === 1 ? 'вывода трутня ' : ''}для заданных параметров\n<b>---------------\n`;
-    text += `${eggs[egg]}\n`;
-    text += `${formatDate(date)}\n`;
-    if (bp.subscribe === 0) text += "Уведомления отключены\n";
-    if (bp.subscribe === 1) text += `Уведомления включены в день события. Время отправки уведомления ${bp.subscribetime}\n`;
-    if (bp.subscribe === 2) text += `Уведомления включены в день и за день до события. Время отправки уведомления ${bp.subscribetime} (мск)\n`;
-    text += "----------------</b>\n";
-    text += atext;
-    text += bp.comment || '';
-    
-    if (bp.waitfor === 'comment') {
-        text += "\n\n<b> Ожидание ввода комментария. Отправьте сообщение, которое будет прикреплено к этому расчету в качестве комментария</b>";
-    }
-    if (bp.waitfor === 'time') {
-        text += "\n\n<b> Ожидание ввода времени уведомления. Отправьте сообщение, в котором укажите время в виде\n08:00 или 8 15 или 8</b>";
+    if (parseMode) {
+        options.parse_mode = parseMode;
     }
     
-    return text;
+    return bot.sendMessage(chatId, text, options);
+}
+
+function editWithKeyboard(chatId, messageId, text, keyboard, parseMode = null) {
+    const options = {
+        chat_id: chatId,
+        message_id: messageId
+    };
+    
+    if (text) {
+        options.text = text;
+    }
+    
+    if (keyboard) {
+        if (keyboard.reply_markup) {
+            options.reply_markup = keyboard.reply_markup;
+        } else if (keyboard.inline_keyboard) {
+            options.reply_markup = keyboard;
+        } else if (Array.isArray(keyboard)) {
+            options.reply_markup = { inline_keyboard: keyboard };
+        }
+    }
+    
+    if (parseMode) {
+        options.parse_mode = parseMode;
+    }
+    
+    return bot.editMessageText(text, options);
+}
+
+function editKeyboardOnly(chatId, messageId, keyboard) {
+    const options = {
+        chat_id: chatId,
+        message_id: messageId
+    };
+    
+    if (keyboard && keyboard.reply_markup) {
+        options.reply_markup = keyboard.reply_markup;
+    } else if (keyboard && keyboard.inline_keyboard) {
+        options.reply_markup = keyboard;
+    } else if (keyboard && Array.isArray(keyboard)) {
+        options.reply_markup = { inline_keyboard: keyboard };
+    } else {
+        options.reply_markup = { inline_keyboard: [] };
+    }
+    
+    return bot.editMessageReplyMarkup(options.reply_markup, options);
+}
+
+// ========== КЛАВИАТУРЫ ==========
+const queenParamsKb = {
+    reply_markup: {
+        inline_keyboard: [
+            [{ text: '1дн. яйцо', callback_data: '1de' }, { text: '2дн. яйцо', callback_data: '2de' }, { text: '3дн. яйцо', callback_data: '3de' }],
+            [{ text: '1дн. личинка', callback_data: '1db' }, { text: '2дн. личинка', callback_data: '2db' }],
+            [{ text: 'запечатанный маточник', callback_data: '9de' }]
+        ]
+    }
+};
+
+const dronParamsKb = {
+    reply_markup: {
+        inline_keyboard: [
+            [{ text: '1дн. яйцо', callback_data: 'd1de' }, { text: '2дн. яйцо', callback_data: 'd2de' }, { text: '3дн. яйцо', callback_data: 'd3de' }],
+            [{ text: 'запечатка трутня', callback_data: 'd10de' }]
+        ]
+    }
+};
+
+const setupKb = {
+    reply_markup: {
+        inline_keyboard: [[{ text: 'Настройка', callback_data: 'setupmessage' }]]
+    }
+};
+
+function getSetupMenuKb() {
+    return {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '📝 Изменить исходные данные', callback_data: 'updatequeen' }],
+                [{ text: '📲 Уведомления в день события', callback_data: 'setsubscribe1' }],
+                [{ text: '📲 Уведомления в день и за день до события', callback_data: 'setsubscribe2' }],
+                [{ text: '❌ Отключить уведомления', callback_data: 'setsubscribe0' }],
+                [{ text: '⏰ Время уведомления (мск)', callback_data: 'setsubscribetime' }],
+                [{ text: '✍ Создать комментарий к записи', callback_data: 'setcomment' }],
+                [{ text: '❎ Убрать меню настройки', callback_data: 'closesetupmenu' }],
+                [{ text: '💣 Удалить запись', callback_data: 'delrec' }]
+            ]
+        }
+    };
+}
+
+function getConfirmDeleteKb() {
+    return {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '✅ Удалить', callback_data: 'yes_delrec' }, { text: '❎ Оставить', callback_data: 'closesetupmenu' }]
+            ]
+        }
+    };
 }
 
 function buildCalendarKeyboard(currentDate) {
@@ -246,15 +186,14 @@ function buildCalendarKeyboard(currentDate) {
     const months = ['', 'январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
     
     const firstDay = new Date(year, month - 1, 1);
-    const lastDay = new Date(year, month, 0);
-    const daysInMonth = lastDay.getDate();
-    const startOffset = firstDay.getDay() === 0 ? 6 : firstDay.getDay() - 1;
+    const daysInMonth = new Date(year, month, 0).getDate();
+    let startOffset = firstDay.getDay() - 1;
+    if (startOffset === -1) startOffset = 6;
     
     const keyboard = [[
-        { text: months[month - 1] || '', callback_data: `setmonth_${month}` }
+        { text: months[month] || '', callback_data: `setmonth_${month}` }
     ]];
     
-    // Дни недели
     const weekDays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     const weekRow = weekDays.map(d => ({ text: d, callback_data: 'ignore' }));
     keyboard.push(weekRow);
@@ -276,29 +215,201 @@ function buildCalendarKeyboard(currentDate) {
     }
     
     if (week.length > 0) {
-        while (week.length < 7) week.push({ text: ' ', callback_data: 'ignore' });
+        while (week.length < 7) {
+            week.push({ text: ' ', callback_data: 'ignore' });
+        }
         keyboard.push(week);
     }
     
-    keyboard.push([{ text: 'подтвердить дату', callback_data: 'setdate' }]);
-    // Убеждаемся, что keyboard - массив, а не объект
-    console.log('Keyboard built, rows:', keyboard.length);    
+    keyboard.push([{ text: '✅ подтвердить дату', callback_data: 'setdate' }]);
     
-    return { inline_keyboard: keyboard };
+    return { reply_markup: { inline_keyboard: keyboard } };
 }
 
-// Обработчики команд
+// ========== ОСНОВНЫЕ ФУНКЦИИ БОТА ==========
+async function updateUser(message) {
+    const from = message.from;
+    let user = await models.BeeUser.findOne({ tg_id: from.id });
+    if (!user) {
+        await models.BeeUser.create({
+            tg_id: from.id,
+            is_bot: from.is_bot ? 1 : 0,
+            first_name: from.first_name || '',
+            last_name: from.last_name || '',
+            username: from.username || '',
+            language_code: from.language_code || ''
+        });
+    } else {
+        await models.BeeUser.update(from.id, {});
+    }
+    return await models.BeeUser.findOne({ tg_id: from.id });
+}
+
+async function addEvent(tg_id, chat_id, msg_id, date, eventId, typ) {
+    const bp = await models.BeeParams.findOne({ tg_id, msg_id, chat_id });
+    if (!bp) return;
+
+    const subscribe = bp.subscribe;
+    const evDate = formatDateForDB(date);
+    
+    if (subscribe === 1 || subscribe === 2) {
+        const eventText = typ === 1 
+            ? `Здравствуйте.\nСегодня, ${formatDate(date)} такое событие:\n\n <b>${events[eventId]}</b>`
+            : `Здравствуйте.\nСегодня, ${formatDate(date)} по прививке необходимо сделать/проконтролировать:\n\n <b>${events[eventId]}</b>`;
+        
+        await models.BeeSubscribes.create({
+            tg_id, chat_id, msg_id,
+            dt: evDate,
+            eventid: eventId,
+            event: eventText,
+            tp: 0,
+            sent: 0
+        });
+    }
+
+    if (subscribe === 2) {
+        const prevDate = new Date(date);
+        prevDate.setDate(prevDate.getDate() - 1);
+        const prevDateStr = formatDateForDB(prevDate);
+        
+        const eventText = typ === 1
+            ? `Здравствуйте.\nСегодня, ${formatDate(date)}\nНапоминаю, что завтра возникнет такое событие:\n\n <b>${events[eventId]}</b>`
+            : `Здравствуйте.\nСегодня ${formatDate(prevDate)}\nНапоминаю, что завтра, ${formatDate(date)} возникнет следующее событие:\n\n <b>${events[eventId]}</b>`;
+        
+        await models.BeeSubscribes.create({
+            tg_id, chat_id, msg_id,
+            dt: prevDateStr,
+            eventid: null,
+            event: eventText,
+            tp: 0,
+            sent: 0
+        });
+    }
+}
+
+async function calcCalendar(msg_id, chat_id, tg_id) {
+    await models.BeeSubscribes.deleteAll({ tg_id, msg_id, chat_id });
+    
+    const bp = await models.BeeParams.findOne({ tg_id, msg_id, chat_id });
+    if (!bp) return '';
+    
+    const egg = bp.egg;
+    const date = parseDate(bp.dt);
+    
+    let eggDate = new Date(date);
+    if (egg !== 1) {
+        eggDate.setDate(eggDate.getDate() - (egg - 1));
+    }
+    
+    let atext = '';
+    
+    if (bp.typ === 0) {
+        let dt = new Date(eggDate);
+        dt.setDate(dt.getDate() + 5);
+        await addEvent(tg_id, chat_id, msg_id, dt, 1, bp.typ);
+        
+        dt.setDate(dt.getDate() + 3);
+        await addEvent(tg_id, chat_id, msg_id, dt, 2, bp.typ);
+        
+        dt = new Date(eggDate);
+        dt.setDate(dt.getDate() + 13);
+        await addEvent(tg_id, chat_id, msg_id, dt, 3, bp.typ);
+        
+        dt.setDate(dt.getDate() + 1);
+        await addEvent(tg_id, chat_id, msg_id, dt, 4, bp.typ);
+        
+        dt.setDate(dt.getDate() + 1);
+        
+        dt = new Date(eggDate);
+        dt.setDate(dt.getDate() + 21);
+        await addEvent(tg_id, chat_id, msg_id, dt, 5, bp.typ);
+        
+        dt = new Date(eggDate);
+        dt.setDate(dt.getDate() + 27);
+        await addEvent(tg_id, chat_id, msg_id, dt, 6, bp.typ);
+        
+        const controlDate = formatDate(new Date(eggDate.getTime() + 5*24*60*60*1000));
+        const closeDate = formatDate(new Date(eggDate.getTime() + 8*24*60*60*1000));
+        const takeDate = formatDate(new Date(eggDate.getTime() + 13*24*60*60*1000));
+        const outDateStart = formatDate(new Date(eggDate.getTime() + 14*24*60*60*1000));
+        const outDateEnd = formatDate(new Date(eggDate.getTime() + 15*24*60*60*1000));
+        const flyDateStart = formatDate(new Date(eggDate.getTime() + 21*24*60*60*1000));
+        const eggControlDate = formatDate(new Date(eggDate.getTime() + 27*24*60*60*1000));
+        
+        if (egg === 9) {
+            atext += `${formatDate(eggDate)} яйцо\n\n`;
+        } else {
+            atext += `${controlDate} - контроль приема, открытый маточник\n`;
+            atext += `${closeDate} - запечатка маточника\n`;
+        }
+        atext += `${takeDate} - отбор (бигуди)\n`;
+        atext += `${outDateStart} - ${outDateEnd} - выход маток\n`;
+        atext += `${flyDateStart} - облет\n`;
+        atext += `c ${eggControlDate} - контроль засева\n\n`;
+        
+    } else if (bp.typ === 1) {
+        let dt = new Date(eggDate);
+        dt.setDate(dt.getDate() + 10);
+        if (egg !== 10) await addEvent(tg_id, chat_id, msg_id, dt, 7, bp.typ);
+        
+        dt.setDate(dt.getDate() + 3);
+        await addEvent(tg_id, chat_id, msg_id, dt, 8, bp.typ);
+        
+        dt.setDate(dt.getDate() + 11);
+        await addEvent(tg_id, chat_id, msg_id, dt, 9, bp.typ);
+        
+        dt.setDate(dt.getDate() + 11);
+        await addEvent(tg_id, chat_id, msg_id, dt, 10, bp.typ);
+        
+        dt = new Date(eggDate);
+        dt.setDate(dt.getDate() + 48);
+        await addEvent(tg_id, chat_id, msg_id, dt, 11, bp.typ);
+        
+        const closeDronDate = formatDate(new Date(eggDate.getTime() + 10*24*60*60*1000));
+        const queenReadyDate = formatDate(new Date(eggDate.getTime() + 13*24*60*60*1000));
+        const dronOutDate = formatDate(new Date(eggDate.getTime() + 24*24*60*60*1000));
+        const dronReadyDate = formatDate(new Date(eggDate.getTime() + 35*24*60*60*1000));
+        const endUsefulDronDate = formatDate(new Date(eggDate.getTime() + 48*24*60*60*1000));
+        
+        if (egg !== 10) atext += `${closeDronDate} - запечатка расплода\n`;
+        atext += `${queenReadyDate} - можно начинать вывод маток\n`;
+        atext += `${dronOutDate} - выход трутня\n`;
+        atext += `${dronReadyDate} - созревание трутня\n`;
+        atext += `${endUsefulDronDate} - трутень далее непригоден для ИО\n\n`;
+    }
+    
+    let text = `Расчет ${bp.typ === 1 ? 'вывода трутня ' : ''}для заданных параметров\n<b>---------------\n`;
+    text += `${eggs[egg]}\n`;
+    text += `${formatDate(date)}\n`;
+    if (bp.subscribe === 0) text += "❌ Уведомления отключены\n";
+    if (bp.subscribe === 1) text += `📲 Уведомления включены в день события. Время отправки уведомления ${bp.subscribetime}\n`;
+    if (bp.subscribe === 2) text += `📲 Уведомления включены в день и за день до события. Время отправки уведомления ${bp.subscribetime} (мск)\n`;
+    text += "----------------</b>\n";
+    text += atext;
+    text += bp.comment || '';
+    
+    if (bp.waitfor === 'comment') {
+        text += "\n\n<b> Ожидание ввода комментария. Отправьте сообщение, которое будет прикреплено к этому расчету в качестве комментария</b>";
+    }
+    if (bp.waitfor === 'time') {
+        text += "\n\n<b> Ожидание ввода времени уведомления. Отправьте сообщение, в котором укажите время в виде\n08:00 или 8 15 или 8</b>";
+    }
+    
+    return text;
+}
+
+// ========== ОБРАБОТЧИКИ КОМАНД ==========
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
-    updateUser(msg);
-    await bot.sendMessage(chatId, 'Привет. Этот бот поможет спланировать вывод маток. Для обсуждения есть чат @beequeencalendar_bot_chat');
+    await updateUser(msg);
+    await sendWithKeyboard(chatId, 'Привет. Этот бот поможет спланировать вывод маток. Для обсуждения есть чат @beequeencalendar_bot_chat', null);
 });
 
 bot.onText(/\/newqueen/, async (msg) => {
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
     await bot.deleteMessage(chatId, messageId);
-    await bot.sendMessage(chatId, 'Выберите начальные данные', queenParamsKb);
+    await sendWithKeyboard(chatId, 'Выберите начальные данные', queenParamsKb);
 });
 
 bot.onText(/\/fastnewqueen/, async (msg) => {
@@ -309,26 +420,33 @@ bot.onText(/\/fastnewqueen/, async (msg) => {
     await bot.deleteMessage(chatId, messageId);
     const sent = await bot.sendMessage(chatId, 'подготовка');
     
-    let bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: sent.message_id, chat_id: chatId });
+    const today = new Date();
+    const todayStr = formatDateForDB(today);
+    
+    let bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: sent.message_id, chat_id: chatId });
     if (!bp) {
-        models.BeeParams.create({
+        // ВНИМАНИЕ: Уведомления ВКЛЮЧЕНЫ по умолчанию (subscribe = DEFAULT_SUBSCRIBE)
+        await models.BeeParams.create({
             tg_id: tgId, chat_id: chatId, msg_id: sent.message_id,
-            typ: 0, egg: 4, subscribe: 0, subscribetime: '08:00', dt: new Date().toISOString().split('T')[0]
+            typ: 0, 
+            egg: DEFAULT_EGG_FOR_FAST, 
+            subscribe: DEFAULT_SUBSCRIBE,  // ← Изменено: теперь включены по умолчанию
+            subscribetime: DEFAULT_SUBSCRIBE_TIME, 
+            dt: todayStr
         });
     } else {
-        models.BeeParams.update(bp.id, { egg: 4 });
+        await models.BeeParams.update(bp.id, { egg: DEFAULT_EGG_FOR_FAST, dt: todayStr });
     }
     
-    const text = calcCalendar(sent.message_id, chatId, tgId);
-    await bot.editMessageText(text, { chat_id: chatId, message_id: sent.message_id, parse_mode: 'HTML' });
-    await bot.editMessageReplyMarkup({ inline_keyboard: setupKb.inline_keyboard }, { chat_id: chatId, message_id: sent.message_id });
+    const text = await calcCalendar(sent.message_id, chatId, tgId);
+    await editWithKeyboard(chatId, sent.message_id, text, setupKb, 'HTML');
 });
 
 bot.onText(/\/newdron/, async (msg) => {
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
     await bot.deleteMessage(chatId, messageId);
-    await bot.sendMessage(chatId, 'Выберите начальные данные', dronParamsKb);
+    await sendWithKeyboard(chatId, 'Выберите начальные данные', dronParamsKb);
 });
 
 bot.onText(/\/summary/, async (msg) => {
@@ -339,12 +457,12 @@ bot.onText(/\/summary/, async (msg) => {
     const nextWeek = new Date();
     nextWeek.setDate(today.getDate() + 7);
     
-    const todayStr = today.toISOString().split('T')[0];
-    const nextWeekStr = nextWeek.toISOString().split('T')[0];
+    const todayStr = formatDateForDB(today);
+    const nextWeekStr = formatDateForDB(nextWeek);
     
-    const list = models.BeeSubscribes.findForSummary(chatId, tgId, todayStr, nextWeekStr);
+    const list = await models.BeeSubscribes.findForSummary(chatId, tgId, todayStr, nextWeekStr);
     
-    if (list.length === 0) {
+    if (!list || list.length === 0) {
         await bot.sendMessage(chatId, 'В ближайшие 7 дней событий нет');
         return;
     }
@@ -352,9 +470,9 @@ bot.onText(/\/summary/, async (msg) => {
     const daysOfWeekRu = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
     let outputText = '';
     let currentGroupTitle = null;
-    console.log("list from bot.js", list);
+    
     for (const record of list) {
-        const date = new Date(record.dt);
+        const date = parseDate(record.dt);
         const formattedDate = `${date.getDate().toString().padStart(2, '0')}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getFullYear()}`;
         const weekDayNumber = (date.getDay() + 6) % 7;
         const weekDay = daysOfWeekRu[weekDayNumber];
@@ -383,9 +501,8 @@ bot.onText(/\/subscribe/, async (msg) => {
     }
 });
 
-// Callback query handler
+// ========== ОБРАБОТЧИК CALLBACK ЗАПРОСОВ ==========
 bot.on('callback_query', async (callbackQuery) => {
-
     if (!callbackQuery || !callbackQuery.data || !callbackQuery.message) {
         console.log('Invalid callback_query received');
         return;
@@ -396,6 +513,8 @@ bot.on('callback_query', async (callbackQuery) => {
     const tgId = callbackQuery.from.id;
     const data = callbackQuery.data;
     
+    console.log(`Received callback_query: tgId=${tgId}, chatId=${chatId}, messageId=${messageId}, data=${data}`);
+
     await bot.answerCallbackQuery(callbackQuery.id);
     
     // Обработка выбора яйца/личинки
@@ -416,21 +535,29 @@ bot.on('callback_query', async (callbackQuery) => {
             case 'd10de': egg = 10; typ = 1; break;
         }
         
-        let bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+        let bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+        const today = new Date();
+        const todayStr = formatDateForDB(today);
+        
         if (!bp) {
-            models.BeeParams.create({
+            // ВНИМАНИЕ: Уведомления ВКЛЮЧЕНЫ по умолчанию (subscribe = DEFAULT_SUBSCRIBE)
+            await models.BeeParams.create({
                 tg_id: tgId, chat_id: chatId, msg_id: messageId,
-                typ: typ, egg: egg, subscribe: 0, subscribetime: '08:00'
+                typ: typ, 
+                egg: egg, 
+                subscribe: DEFAULT_SUBSCRIBE,  // ← Изменено: теперь включены по умолчанию
+                subscribetime: DEFAULT_SUBSCRIBE_TIME,
+                dt: todayStr
             });
-            bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+            bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         } else {
-            models.BeeParams.update(bp.id, { egg: egg, typ: typ });
-            bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+            await models.BeeParams.update(bp.id, { egg: egg, typ: typ });
+            bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         }
         
-        const currentDate = bp.dt ? new Date(bp.dt) : new Date();
-        await bot.editMessageText(`Выбрано ${eggs[egg]}\nВыберите дату`, { chat_id: chatId, message_id: messageId });
-        await bot.editMessageReplyMarkup(buildCalendarKeyboard(currentDate), { chat_id: chatId, message_id: messageId });
+        const currentDate = bp.dt ? parseDate(bp.dt) : new Date();
+        const calendarKeyboard = buildCalendarKeyboard(currentDate);
+        await editWithKeyboard(chatId, messageId, `Выбрано ${eggs[egg]}\nВыберите дату`, calendarKeyboard);
         return;
     }
     
@@ -438,12 +565,13 @@ bot.on('callback_query', async (callbackQuery) => {
     if (data.startsWith('setday_')) {
         const day = parseInt(data.split('_')[1]);
         if (day && !isNaN(day)) {
-            const bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+            const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
             if (bp && bp.dt) {
-                const currentDate = new Date(bp.dt);
+                const currentDate = parseDate(bp.dt);
                 currentDate.setDate(day);
-                models.BeeParams.update(bp.id, { dt: currentDate.toISOString().split('T')[0] });
-                await bot.editMessageReplyMarkup(buildCalendarKeyboard(currentDate), { chat_id: chatId, message_id: messageId });
+                await models.BeeParams.update(bp.id, { dt: formatDateForDB(currentDate) });
+                const newKeyboard = buildCalendarKeyboard(currentDate);
+                await editKeyboardOnly(chatId, messageId, newKeyboard);
             }
         }
         return;
@@ -453,16 +581,20 @@ bot.on('callback_query', async (callbackQuery) => {
     if (data.startsWith('setmonth_')) {
         const month = parseInt(data.split('_')[1]);
         if (month && !isNaN(month)) {
-            const bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+            const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
             if (bp && bp.dt) {
-                const currentDate = new Date(bp.dt);
+                const currentDate = parseDate(bp.dt);
+                const oldDay = currentDate.getDate();
                 currentDate.setMonth(month - 1);
-                // Если день некорректный для нового месяца, установим на 1 число
-                if (currentDate.getMonth() !== month - 1) {
-                    currentDate.setDate(1);
+                
+                const newDay = currentDate.getDate();
+                if (newDay !== oldDay) {
+                    currentDate.setDate(0);
                 }
-                models.BeeParams.update(bp.id, { dt: currentDate.toISOString().split('T')[0] });
-                await bot.editMessageReplyMarkup(buildCalendarKeyboard(currentDate), { chat_id: chatId, message_id: messageId });
+                
+                await models.BeeParams.update(bp.id, { dt: formatDateForDB(currentDate) });
+                const newKeyboard = buildCalendarKeyboard(currentDate);
+                await editKeyboardOnly(chatId, messageId, newKeyboard);
             }
         }
         return;
@@ -470,102 +602,82 @@ bot.on('callback_query', async (callbackQuery) => {
     
     // Подтверждение даты
     if (data === 'setdate') {
-        const text = calcCalendar(messageId, chatId, tgId);
-        await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
-        await bot.editMessageReplyMarkup(setupKb, { chat_id: chatId, message_id: messageId });
+        const text = await calcCalendar(messageId, chatId, tgId);
+        await editWithKeyboard(chatId, messageId, text, setupKb, 'HTML');
         return;
     }
     
     // Закрыть меню настройки
     if (data === 'closesetupmenu') {
-        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
+        await editKeyboardOnly(chatId, messageId, setupKb);
         return;
     }
     
     // Открыть меню настройки
     if (data === 'setupmessage') {
-        const setupMenu = {
-            inline_keyboard: [
-                [{ text: '📝 Изменить исходные данные', callback_data: 'updatequeen' }],
-                [{ text: '📲 Уведомления в день события', callback_data: 'setsubscribe1' }],
-                [{ text: '📲 Уведомления в день и за день до события', callback_data: 'setsubscribe2' }],
-                [{ text: '❌ Отключить уведомления', callback_data: 'setsubscribe0' }],
-                [{ text: '⏰ Время уведомления (мск)', callback_data: 'setsubscribetime' }],
-                [{ text: '✍ Создать комментарий к записи', callback_data: 'setcomment' }],
-                [{ text: '❎ Убрать меню настройки', callback_data: 'closesetupmenu' }],
-                [{ text: '💣 Удалить запись', callback_data: 'delrec' }]
-            ]
-        };
-        await bot.editMessageReplyMarkup(setupMenu, { chat_id: chatId, message_id: messageId });
+        await editKeyboardOnly(chatId, messageId, getSetupMenuKb());
         return;
     }
     
     // Изменить исходные данные
     if (data === 'updatequeen') {
-        const bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+        const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         const kb = bp && bp.typ === 1 ? dronParamsKb : queenParamsKb;
-        await bot.editMessageText('Выберите начальные данные', { chat_id: chatId, message_id: messageId });
-        await bot.editMessageReplyMarkup(kb, { chat_id: chatId, message_id: messageId });
+        await editWithKeyboard(chatId, messageId, 'Выберите начальные данные', kb);
         return;
     }
     
     // Настройка подписок
     if (data === 'setsubscribe0' || data === 'setsubscribe1' || data === 'setsubscribe2') {
         const subscribe = parseInt(data.slice(-1));
-        const bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+        const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         if (bp) {
-            models.BeeParams.update(bp.id, { subscribe });
-            const text = calcCalendar(messageId, chatId, tgId);
-            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
-            await bot.editMessageReplyMarkup(setupKb, { chat_id: chatId, message_id: messageId });
+            await models.BeeParams.update(bp.id, { subscribe });
+            const text = await calcCalendar(messageId, chatId, tgId);
+            await editWithKeyboard(chatId, messageId, text, setupKb, 'HTML');
         }
         return;
     }
     
     // Установка времени уведомлений
     if (data === 'setsubscribetime') {
-        const bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+        const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         if (bp) {
-            models.BeeParams.update(bp.id, { waitfor: 'time' });
-            const text = calcCalendar(messageId, chatId, tgId);
-            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
+            await models.BeeParams.update(bp.id, { waitfor: 'time' });
+            const text = await calcCalendar(messageId, chatId, tgId);
+            await editWithKeyboard(chatId, messageId, text, setupKb, 'HTML');
         }
         return;
     }
     
     // Установка комментария
     if (data === 'setcomment') {
-        const bp = models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+        const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         if (bp) {
-            models.BeeParams.update(bp.id, { waitfor: 'comment' });
-            const text = calcCalendar(messageId, chatId, tgId);
-            await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
+            await models.BeeParams.update(bp.id, { waitfor: 'comment' });
+            const text = await calcCalendar(messageId, chatId, tgId);
+            await editWithKeyboard(chatId, messageId, text, setupKb, 'HTML');
         }
         return;
     }
     
     // Удаление записи
     if (data === 'delrec') {
-        const confirmKb = {
-            inline_keyboard: [
-                [{ text: '✅ Удалить', callback_data: 'yes_delrec' }, { text: '❎ Оставить', callback_data: 'closesetupmenu' }]
-            ]
-        };
-        await bot.editMessageReplyMarkup(confirmKb, { chat_id: chatId, message_id: messageId });
+        await editKeyboardOnly(chatId, messageId, getConfirmDeleteKb());
         return;
     }
     
     if (data === 'yes_delrec') {
-        models.BeeParams.delete({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
-        models.BeeMessages.deleteAll({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
-        await bot.editMessageText('Удалено', { chat_id: chatId, message_id: messageId, parse_mode: 'HTML' });
+        await models.BeeParams.delete({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+        await models.BeeMessages.deleteAll({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
+        await editWithKeyboard(chatId, messageId, 'Удалено', null, 'HTML');
         return;
     }
 });
 
-// Обработка текстовых сообщений (для комментариев и времени)
+// ========== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ==========
 bot.on('message', async (msg) => {
-    if (msg.text && msg.text.startsWith('/')) return; // Skip commands
+    if (msg.text && msg.text.startsWith('/')) return;
     
     const chatId = msg.chat.id;
     const tgId = msg.from.id;
@@ -573,18 +685,17 @@ bot.on('message', async (msg) => {
     const text = msg.text;
     
     // Обработка комментария
-    let bp = models.BeeParams.findOne({ chat_id: chatId, waitfor: 'comment' });
+    let bp = await models.BeeParams.findOne({ chat_id: chatId, waitfor: 'comment' });
     if (bp) {
-        models.BeeParams.update(bp.id, { comment: text, waitfor: null });
+        await models.BeeParams.update(bp.id, { comment: text, waitfor: null });
         await bot.deleteMessage(chatId, messageId);
-        const newText = calcCalendar(bp.msg_id, chatId, bp.tg_id);
-        await bot.editMessageText(newText, { chat_id: chatId, message_id: bp.msg_id, parse_mode: 'HTML' });
-        await bot.editMessageReplyMarkup(setupKb, { chat_id: chatId, message_id: bp.msg_id });
+        const newText = await calcCalendar(bp.msg_id, chatId, bp.tg_id);
+        await editWithKeyboard(chatId, bp.msg_id, newText, setupKb, 'HTML');
         return;
     }
     
     // Обработка времени
-    bp = models.BeeParams.findOne({ chat_id: chatId, waitfor: 'time' });
+    bp = await models.BeeParams.findOne({ chat_id: chatId, waitfor: 'time' });
     if (bp) {
         const timeMatch = text.match(/(\d{1,2})(?:\s|:)?(\d{0,2})/);
         if (timeMatch) {
@@ -593,22 +704,25 @@ bot.on('message', async (msg) => {
             if (hours < 0 || hours > 23) hours = 8;
             if (minutes < 0 || minutes > 59) minutes = 0;
             const timeStr = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
-            models.BeeParams.update(bp.id, { subscribetime: timeStr, waitfor: null });
+            await models.BeeParams.update(bp.id, { subscribetime: timeStr, waitfor: null });
             await bot.deleteMessage(chatId, messageId);
-            const newText = calcCalendar(bp.msg_id, chatId, bp.tg_id);
-            await bot.editMessageText(newText, { chat_id: chatId, message_id: bp.msg_id, parse_mode: 'HTML' });
-            await bot.editMessageReplyMarkup(setupKb, { chat_id: chatId, message_id: bp.msg_id });
+            const newText = await calcCalendar(bp.msg_id, chatId, bp.tg_id);
+            await editWithKeyboard(chatId, bp.msg_id, newText, setupKb, 'HTML');
         }
         return;
     }
     
     // Сохраняем сообщение в beemessages
-    const existing = models.BeeMessages.findOne({ tg_id: tgId, chat_id: chatId, msg_id: messageId });
+    const existing = await models.BeeMessages.findOne({ tg_id: tgId, chat_id: chatId, msg_id: messageId });
     if (!existing && text) {
-        models.BeeMessages.create({ tg_id: tgId, chat_id: chatId, msg_id: messageId, message: text });
+        await models.BeeMessages.create({ tg_id: tgId, chat_id: chatId, msg_id: messageId, message: text });
     }
 });
 
 console.log('🤖 Bot started with long polling...');
+console.log('📋 Default settings:');
+console.log(`   - Notifications: ${DEFAULT_SUBSCRIBE === 2 ? 'ON (day and day before)' : DEFAULT_SUBSCRIBE === 1 ? 'ON (day only)' : 'OFF'}`);
+console.log(`   - Notification time: ${DEFAULT_SUBSCRIBE_TIME}`);
+console.log(`   - Fast new queen egg: ${eggs[DEFAULT_EGG_FOR_FAST]}`);
 
 module.exports = bot;
