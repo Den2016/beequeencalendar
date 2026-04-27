@@ -5,6 +5,12 @@ const path = require('path');
 
 const bot = new TelegramBot(config.botToken, { polling: true });
 
+// Генератор уникальных ID для отслеживания
+let requestCounter = 0;
+function getRequestId() {
+    return ++requestCounter;
+}
+
 // Константы из PHP
 const eggs = {
     1: 'яйцо стоячее (1день)',
@@ -37,6 +43,34 @@ const DEFAULT_EGG_FOR_FAST = 4;
 
 // ========== ID АДМИНИСТРАТОРА ==========
 const ADMIN_ID = 1510959343;
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🚨 UNHANDLED REJECTION in bot.js:', reason);
+    console.error('Promise:', promise);
+    const fs = require('fs');
+    const path = require('path');
+    const crashLogPath = path.join(__dirname, 'crash.log');
+    fs.appendFileSync(crashLogPath, `${new Date().toISOString()} - ${reason}\n`);
+});
+
+
+// Логирование polling событий
+bot.on('polling_error', (error) => {
+    console.error('📡 POLLING ERROR:', error.message);
+    console.error('   Code:', error.code);
+    console.error('   Response:', error.response?.body);
+});
+
+bot.on('webhook_error', (error) => {
+    console.error('🔗 WEBHOOK ERROR:', error.message);
+});
+
+// Перехват всех сетевых ошибок
+bot.on('error', (error) => {
+    console.error('💥 BOT ERROR:', error.message);
+});
+
+
 
 // ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ДАТАМИ ==========
 function parseDate(dateString) {
@@ -119,7 +153,7 @@ function editWithKeyboard(chatId, messageId, text, keyboard, parseMode = null) {
     return bot.editMessageText(text, options);
 }
 
-function editKeyboardOnly(chatId, messageId, keyboard) {
+async function editKeyboardOnly(chatId, messageId, keyboard) {
     const options = {
         chat_id: chatId,
         message_id: messageId
@@ -135,7 +169,15 @@ function editKeyboardOnly(chatId, messageId, keyboard) {
         options.reply_markup = { inline_keyboard: [] };
     }
     
-    return bot.editMessageReplyMarkup(options.reply_markup, options);
+    try {
+        return await bot.editMessageReplyMarkup(options.reply_markup, options);
+    } catch (err) {
+        if (err.message && err.message.includes('message is not modified')) {
+            console.log('⚠️ Skipping edit: message content unchanged');
+            return null;
+        }
+        throw err;
+    }
 }
 
 // ========== КЛАВИАТУРЫ ==========
@@ -271,11 +313,8 @@ async function updateUser(message) {
 
 // Программное удаление записи и всех связанных уведомлений
 async function deleteRecordAndNotifications(tg_id, chat_id, msg_id) {
-    // Удаляем уведомления
     await models.BeeSubscribes.deleteAll({ tg_id, msg_id, chat_id });
-    // Удаляем сообщения
     await models.BeeMessages.deleteAll({ tg_id, msg_id, chat_id });
-    // Удаляем параметры
     await models.BeeParams.delete({ tg_id, msg_id, chat_id });
     
     console.log(`🗑️ Deleted record and all related notifications for tg_id=${tg_id}, msg_id=${msg_id}, chat_id=${chat_id}`);
@@ -284,7 +323,26 @@ async function deleteRecordAndNotifications(tg_id, chat_id, msg_id) {
 async function addEvent(tg_id, chat_id, msg_id, date, eventId, typ) {
     const bp = await models.BeeParams.findOne({ tg_id, msg_id, chat_id });
     if (!bp) return;
-
+    // ============================================
+    // НОВАЯ ПРОВЕРКА: исключаем прошедшие даты
+    // ============================================
+    // Получаем текущую дату БЕЗ времени (только год-месяц-день)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    // Дата события (тоже без времени)
+    const eventDate = new Date(date);
+    eventDate.setHours(0, 0, 0, 0);
+    
+    // Если дата события меньше сегодняшней (прошла) - не добавляем
+    if (eventDate < today) {
+        console.log(`⏭️ Skipping addEvent: event ${eventId} date ${formatDateForDB(date)} is in the past (before today)`);
+        return;
+    }
+    // ============================================
+    // КОНЕЦ ПРОВЕРКИ
+    // ============================================
+    
     const subscribe = bp.subscribe;
     const evDate = formatDateForDB(date);
     
@@ -324,7 +382,6 @@ async function addEvent(tg_id, chat_id, msg_id, date, eventId, typ) {
 }
 
 async function calcCalendar(msg_id, chat_id, tg_id) {
-    // Удаляем старые события перед пересчетом
     await models.BeeSubscribes.deleteAll({ tg_id, msg_id, chat_id });
     
     const bp = await models.BeeParams.findOne({ tg_id, msg_id, chat_id });
@@ -439,63 +496,7 @@ async function calcCalendar(msg_id, chat_id, tg_id) {
 
 const broadcastCache = new Map();
 
-bot.onText(/\/start_sending_message/, async (msg) => {
-    const chatId = msg.chat.id;
-    const tgId = msg.from.id;
-    const replyTo = msg.reply_to_message;
-    const msgId = msg.message_id;
-    
-    await bot.deleteMessage(chatId, msgId);
-    
-    if (tgId !== ADMIN_ID) {
-        await bot.sendMessage(chatId, '❌ У вас нет прав на использование этой команды');
-        return;
-    }
-    
-    if (!replyTo) {
-        await bot.sendMessage(chatId, 
-            'ℹ️ Команда /start_sending_message запускает рассылку сообщения, ' +
-            'в ответ на которое она дана.\n\n' +
-            'Использование: ответьте на сообщение командой /start_sending_message'
-        );
-        return;
-    }
-    
-    const messageToSend = replyTo.text;
-    if (!messageToSend) {
-        await bot.sendMessage(chatId, '❌ Сообщение для рассылки не содержит текст');
-        return;
-    }
-    
-    const users = await models.BeeUser.findAll();
-    const usersCount = users.length;
-    
-    if (usersCount === 0) {
-        await bot.sendMessage(chatId, '❌ Нет пользователей для рассылки');
-        return;
-    }
-    
-    const preview = `📢 <b>Подтверждение запуска массовой рассылки</b>\n\n` +
-                   `👥 Пользователей: ${usersCount}\n` +
-                   `⏰ Отправка начнется через 10 минут\n\n` +
-                   `📝 Сообщение для рассылки:\n` +
-                   `─${'─'.repeat(40)}─\n${messageToSend}\n─${'─'.repeat(40)}─\n\n` +
-                   `⚠️ Рассылка будет отправлена ВСЕМ пользователям бота.\n` +
-                   `Отправка управляется шедулером с учетом лимитов Telegram.\n\n` +
-                   `Продолжить?`;
-    
-    broadcastCache.set(chatId, {
-        message: messageToSend,
-        replyToId: replyTo.message_id,
-        usersCount: usersCount,
-        timestamp: Date.now()
-    });
-    
-    await bot.sendMessage(chatId, preview, {
-        parse_mode: 'HTML',
-        reply_markup: getBroadcastConfirmKb().reply_markup
-    });
-});
+
 
 async function createBroadcastQueue(messageText, replyToMsgId) {
     const users = await models.BeeUser.findAll();
@@ -544,33 +545,53 @@ async function createBroadcastQueue(messageText, replyToMsgId) {
 // ========== ОБРАБОТЧИКИ КОМАНД ==========
 
 bot.onText(/\/start/, async (msg) => {
+    const rid = getRequestId();
+    console.log(`🆔 [${rid}] /start START - message_id=${msg.message_id}, chat_id=${msg.chat.id}`);
+    
     const chatId = msg.chat.id;
     await updateUser(msg);
     await sendWithKeyboard(chatId, 'Привет. Этот бот поможет спланировать вывод маток. Для обсуждения есть чат @beequeencalendar_bot_chat', null);
+    
+    console.log(`🆔 [${rid}] /start END`);
 });
 
 bot.onText(/\/newqueen/, async (msg) => {
+    const rid = getRequestId();
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
+    console.log(`🆔 [${rid}] /newqueen START - message_id=${messageId}, chat_id=${chatId}`);
+    
     await updateUser(msg);
+    
+    console.log(`🆔 [${rid}] /newqueen deleting message ${messageId}`);
     await bot.deleteMessage(chatId, messageId);
+    
     await sendWithKeyboard(chatId, 'Выберите начальные данные', queenParamsKb);
+    console.log(`🆔 [${rid}] /newqueen END`);
 });
 
 bot.onText(/\/fastnewqueen/, async (msg) => {
+    const rid = getRequestId();
     const chatId = msg.chat.id;
     const tgId = msg.from.id;
     const messageId = msg.message_id;
+    console.log(`🆔 [${rid}] /fastnewqueen START - message_id=${messageId}, chat_id=${chatId}, tgId=${tgId}`);
     
     await updateUser(msg);
+    
+    console.log(`🆔 [${rid}] /fastnewqueen deleting original message ${messageId}`);
     await bot.deleteMessage(chatId, messageId);
+    
+    console.log(`🆔 [${rid}] /fastnewqueen sending 'подготовка' message`);
     const sent = await bot.sendMessage(chatId, 'подготовка');
+    console.log(`🆔 [${rid}] /fastnewqueen got reply message_id=${sent.message_id}`);
     
     const today = new Date();
     const todayStr = formatDateForDB(today);
     
     let bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: sent.message_id, chat_id: chatId });
     if (!bp) {
+        console.log(`🆔 [${rid}] /fastnewqueen creating new BeeParams`);
         await models.BeeParams.create({
             tg_id: tgId, chat_id: chatId, msg_id: sent.message_id,
             typ: 0, 
@@ -580,24 +601,40 @@ bot.onText(/\/fastnewqueen/, async (msg) => {
             dt: todayStr
         });
     } else {
+        console.log(`🆔 [${rid}] /fastnewqueen updating existing BeeParams id=${bp.id}`);
         await models.BeeParams.update(bp.id, { egg: DEFAULT_EGG_FOR_FAST, dt: todayStr });
     }
     
+    console.log(`🆔 [${rid}] /fastnewqueen calculating calendar`);
     const text = await calcCalendar(sent.message_id, chatId, tgId);
+    
+    console.log(`🆔 [${rid}] /fastnewqueen editing message to final calendar`);
     await editWithKeyboard(chatId, sent.message_id, text, setupKb, 'HTML');
+    
+    console.log(`🆔 [${rid}] /fastnewqueen END`);
 });
 
 bot.onText(/\/newdron/, async (msg) => {
+    const rid = getRequestId();
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
+    console.log(`🆔 [${rid}] /newdron START - message_id=${messageId}, chat_id=${chatId}`);
+    
     await updateUser(msg);
+    
+    console.log(`🆔 [${rid}] /newdron deleting message ${messageId}`);
     await bot.deleteMessage(chatId, messageId);
+    
     await sendWithKeyboard(chatId, 'Выберите начальные данные', dronParamsKb);
+    console.log(`🆔 [${rid}] /newdron END`);
 });
 
 bot.onText(/\/summary/, async (msg) => {
+    const rid = getRequestId();
     const chatId = msg.chat.id;
     const tgId = msg.from.id;
+    console.log(`🆔 [${rid}] /summary START - chat_id=${chatId}, tgId=${tgId}`);
+    
     await updateUser(msg);
     
     const today = new Date();
@@ -611,6 +648,7 @@ bot.onText(/\/summary/, async (msg) => {
     
     if (!list || list.length === 0) {
         await bot.sendMessage(chatId, 'В ближайшие 7 дней событий нет');
+        console.log(`🆔 [${rid}] /summary END - no events`);
         return;
     }
     
@@ -635,20 +673,24 @@ bot.onText(/\/summary/, async (msg) => {
     }
     
     await bot.sendMessage(chatId, outputText, { parse_mode: 'HTML' });
+    console.log(`🆔 [${rid}] /summary END - sent ${list.length} events`);
 });
 
 // ========== КОМАНДА /subscribe (массовая рассылка) ==========
 
 bot.onText(/\/subscribe/, async (msg) => {
+    const rid = getRequestId();
     const chatId = msg.chat.id;
     const tgId = msg.from.id;
     const replyTo = msg.reply_to_message;
     const msgId = msg.message_id;
+    console.log(`🆔 [${rid}] /subscribe START - chat_id=${chatId}, tgId=${tgId}, reply_to=${replyTo?.message_id}`);
     
     await bot.deleteMessage(chatId, msgId);
     
     if (tgId !== ADMIN_ID) {
         await bot.sendMessage(chatId, '❌ У вас нет прав на использование этой команды');
+        console.log(`🆔 [${rid}] /subscribe END - access denied`);
         return;
     }
     
@@ -657,12 +699,14 @@ bot.onText(/\/subscribe/, async (msg) => {
             'ℹ️ Команда /subscribe должна использоваться как ответ на сообщение.\n\n' +
             'Отправьте сообщение и ответьте на него командой /subscribe'
         );
+        console.log(`🆔 [${rid}] /subscribe END - no reply_to`);
         return;
     }
     
     const messageToSend = replyTo.text;
     if (!messageToSend) {
         await bot.sendMessage(chatId, '❌ Сообщение для рассылки не содержит текст');
+        console.log(`🆔 [${rid}] /subscribe END - empty message`);
         return;
     }
     
@@ -670,6 +714,7 @@ bot.onText(/\/subscribe/, async (msg) => {
     
     if (users.length === 0) {
         await bot.sendMessage(chatId, '❌ Нет пользователей для рассылки');
+        console.log(`🆔 [${rid}] /subscribe END - no users`);
         return;
     }
     
@@ -717,14 +762,19 @@ bot.onText(/\/subscribe/, async (msg) => {
         `⏱️ Отправка управляется шедулером.`,
         { parse_mode: 'HTML' }
     );
+    console.log(`🆔 [${rid}] /subscribe END - created ${created} broadcasts`);
 });
 
 // ========== ОБРАБОТЧИК CALLBACK ЗАПРОСОВ ==========
 bot.on('callback_query', async (callbackQuery) => {
+    const rid = getRequestId();
+    
     if (!callbackQuery || !callbackQuery.data || !callbackQuery.message) {
-        console.log('Invalid callback_query received');
+        console.log(`🆔 [${rid}] Invalid callback_query received`);
         return;
     }
+
+    console.log(`🆔 [${rid}] CALLBACK START - data=${callbackQuery.data}, message_id=${callbackQuery.message.message_id}, tgId=${callbackQuery.from.id}`);
 
     const fakeMsg = {
         from: callbackQuery.from,
@@ -737,7 +787,7 @@ bot.on('callback_query', async (callbackQuery) => {
     const tgId = callbackQuery.from.id;
     const data = callbackQuery.data;
     
-    console.log(`Received callback_query: tgId=${tgId}, chatId=${chatId}, messageId=${messageId}, data=${data}`);
+    console.log(`🆔 [${rid}] CALLBACK: tgId=${tgId}, chatId=${chatId}, messageId=${messageId}, data=${data}`);
 
     await bot.answerCallbackQuery(callbackQuery.id);
     
@@ -748,6 +798,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 message_id: messageId
             });
             broadcastCache.delete(chatId);
+            console.log(`🆔 [${rid}] CALLBACK confirm_broadcast - access denied`);
             return;
         }
         
@@ -757,6 +808,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 chat_id: chatId,
                 message_id: messageId
             });
+            console.log(`🆔 [${rid}] CALLBACK confirm_broadcast - no data in cache`);
             return;
         }
         
@@ -782,6 +834,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 message_id: messageId,
                 parse_mode: 'HTML'
             });
+            console.log(`🆔 [${rid}] CALLBACK confirm_broadcast - success`);
             
         } catch (error) {
             console.error('Broadcast creation error:', error);
@@ -792,6 +845,7 @@ bot.on('callback_query', async (callbackQuery) => {
         }
         
         broadcastCache.delete(chatId);
+        console.log(`🆔 [${rid}] CALLBACK END`);
         return;
     }
     
@@ -801,6 +855,7 @@ bot.on('callback_query', async (callbackQuery) => {
             message_id: messageId
         });
         broadcastCache.delete(chatId);
+        console.log(`🆔 [${rid}] CALLBACK cancel_broadcast`);
         return;
     }
     
@@ -821,11 +876,14 @@ bot.on('callback_query', async (callbackQuery) => {
             case 'd10de': egg = 10; typ = 1; break;
         }
         
+        console.log(`🆔 [${rid}] CALLBACK: selected egg=${egg}, typ=${typ}`);
+        
         let bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         const today = new Date();
         const todayStr = formatDateForDB(today);
         
         if (!bp) {
+            console.log(`🆔 [${rid}] CALLBACK: creating new BeeParams`);
             await models.BeeParams.create({
                 tg_id: tgId, chat_id: chatId, msg_id: messageId,
                 typ: typ, 
@@ -836,6 +894,7 @@ bot.on('callback_query', async (callbackQuery) => {
             });
             bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         } else {
+            console.log(`🆔 [${rid}] CALLBACK: updating existing BeeParams id=${bp.id}`);
             await models.BeeParams.update(bp.id, { egg: egg, typ: typ });
             bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         }
@@ -843,12 +902,14 @@ bot.on('callback_query', async (callbackQuery) => {
         const currentDate = bp.dt ? parseDate(bp.dt) : new Date();
         const calendarKeyboard = buildCalendarKeyboard(currentDate);
         await editWithKeyboard(chatId, messageId, `Выбрано ${eggs[egg]}\nВыберите дату`, calendarKeyboard);
+        console.log(`🆔 [${rid}] CALLBACK: calendar shown`);
         return;
     }
     
     if (data.startsWith('setday_')) {
         const day = parseInt(data.split('_')[1]);
         if (day && !isNaN(day)) {
+            console.log(`🆔 [${rid}] CALLBACK: setday_${day}`);
             const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
             if (bp && bp.dt) {
                 const currentDate = parseDate(bp.dt);
@@ -864,6 +925,7 @@ bot.on('callback_query', async (callbackQuery) => {
     if (data.startsWith('setmonth_')) {
         const month = parseInt(data.split('_')[1]);
         if (month && !isNaN(month)) {
+            console.log(`🆔 [${rid}] CALLBACK: setmonth_${month}`);
             const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
             if (bp && bp.dt) {
                 const currentDate = parseDate(bp.dt);
@@ -884,22 +946,27 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     
     if (data === 'setdate') {
+        console.log(`🆔 [${rid}] CALLBACK: setdate - calculating final calendar`);
         const text = await calcCalendar(messageId, chatId, tgId);
         await editWithKeyboard(chatId, messageId, text, setupKb, 'HTML');
+        console.log(`🆔 [${rid}] CALLBACK: calendar calculated and saved`);
         return;
     }
     
     if (data === 'closesetupmenu') {
+        console.log(`🆔 [${rid}] CALLBACK: closesetupmenu`);
         await editKeyboardOnly(chatId, messageId, setupKb);
         return;
     }
     
     if (data === 'setupmessage') {
+        console.log(`🆔 [${rid}] CALLBACK: setupmessage - showing setup menu`);
         await editKeyboardOnly(chatId, messageId, getSetupMenuKb());
         return;
     }
     
     if (data === 'updatequeen') {
+        console.log(`🆔 [${rid}] CALLBACK: updatequeen`);
         const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         const kb = bp && bp.typ === 1 ? dronParamsKb : queenParamsKb;
         await editWithKeyboard(chatId, messageId, 'Выберите начальные данные', kb);
@@ -908,6 +975,7 @@ bot.on('callback_query', async (callbackQuery) => {
     
     if (data === 'setsubscribe0' || data === 'setsubscribe1' || data === 'setsubscribe2') {
         const subscribe = parseInt(data.slice(-1));
+        console.log(`🆔 [${rid}] CALLBACK: setsubscribe${subscribe}`);
         const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         if (bp) {
             await models.BeeParams.update(bp.id, { subscribe });
@@ -918,6 +986,7 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     
     if (data === 'setsubscribetime') {
+        console.log(`🆔 [${rid}] CALLBACK: setsubscribetime - waiting for time input`);
         const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         if (bp) {
             await models.BeeParams.update(bp.id, { waitfor: 'time' });
@@ -928,6 +997,7 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     
     if (data === 'setcomment') {
+        console.log(`🆔 [${rid}] CALLBACK: setcomment - waiting for comment`);
         const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         if (bp) {
             await models.BeeParams.update(bp.id, { waitfor: 'comment' });
@@ -938,23 +1008,34 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     
     if (data === 'delrec') {
+        console.log(`🆔 [${rid}] CALLBACK: delrec - asking for confirmation`);
         await editKeyboardOnly(chatId, messageId, getConfirmDeleteKb());
         return;
     }
     
     if (data === 'yes_delrec') {
-        // Программное удаление записи и всех связанных уведомлений
+        console.log(`🆔 [${rid}] CALLBACK: yes_delrec - deleting record`);
         await deleteRecordAndNotifications(tgId, chatId, messageId);
         await editWithKeyboard(chatId, messageId, '✅ Запись и все связанные уведомления удалены', null, 'HTML');
+        console.log(`🆔 [${rid}] CALLBACK: record deleted`);
         return;
     }
+    
+    console.log(`🆔 [${rid}] CALLBACK END - unhandled data: ${data}`);
 });
 
 // ========== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ==========
 bot.on('message', async (msg) => {
-    await updateUser(msg);
+    const rid = getRequestId();
     
-    if (msg.text && msg.text.startsWith('/')) return;
+    if (msg.text && msg.text.startsWith('/')) {
+        // Команды уже обработаны onText, не логируем их повторно
+        return;
+    }
+    
+    console.log(`🆔 [${rid}] MESSAGE START - message_id=${msg.message_id}, chat_id=${msg.chat.id}, text=${msg.text?.substring(0, 50)}`);
+    
+    await updateUser(msg);
     
     const chatId = msg.chat.id;
     const tgId = msg.from.id;
@@ -963,15 +1044,18 @@ bot.on('message', async (msg) => {
     
     let bp = await models.BeeParams.findOne({ chat_id: chatId, waitfor: 'comment' });
     if (bp) {
+        console.log(`🆔 [${rid}] MESSAGE: processing as comment for bp_id=${bp.id}`);
         await models.BeeParams.update(bp.id, { comment: text, waitfor: null });
         await bot.deleteMessage(chatId, messageId);
         const newText = await calcCalendar(bp.msg_id, chatId, bp.tg_id);
         await editWithKeyboard(chatId, bp.msg_id, newText, setupKb, 'HTML');
+        console.log(`🆔 [${rid}] MESSAGE: comment saved`);
         return;
     }
     
     bp = await models.BeeParams.findOne({ chat_id: chatId, waitfor: 'time' });
     if (bp) {
+        console.log(`🆔 [${rid}] MESSAGE: processing as time input for bp_id=${bp.id}, text=${text}`);
         const timeMatch = text.match(/(\d{1,2})(?:\s|:)?(\d{0,2})/);
         if (timeMatch) {
             let hours = parseInt(timeMatch[1]);
@@ -983,6 +1067,9 @@ bot.on('message', async (msg) => {
             await bot.deleteMessage(chatId, messageId);
             const newText = await calcCalendar(bp.msg_id, chatId, bp.tg_id);
             await editWithKeyboard(chatId, bp.msg_id, newText, setupKb, 'HTML');
+            console.log(`🆔 [${rid}] MESSAGE: time saved as ${timeStr}`);
+        } else {
+            console.log(`🆔 [${rid}] MESSAGE: time regex did not match`);
         }
         return;
     }
@@ -990,8 +1077,16 @@ bot.on('message', async (msg) => {
     const existing = await models.BeeMessages.findOne({ tg_id: tgId, chat_id: chatId, msg_id: messageId });
     if (!existing && text) {
         await models.BeeMessages.create({ tg_id: tgId, chat_id: chatId, msg_id: messageId, message: text });
+        console.log(`🆔 [${rid}] MESSAGE: saved to BeeMessages`);
     }
+    
+    console.log(`🆔 [${rid}] MESSAGE END`);
 });
+
+// Убираем дублирующую обертку для callback_query, так как она уже применена выше,
+// но оставляем оригинальный обработчик без обертки, чтобы не было конфликта.
+// (Обертка была добавлена в конце файла, но она конфликтует с прямым on('callback_query').
+// Удаляем дублирующую обертку.
 
 console.log('🤖 Bot started with long polling...');
 console.log('📋 Default settings:');

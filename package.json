@@ -4,7 +4,7 @@
   "description": "Telegram bot for beekeeping queen breeding calendar",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "set NODE_ENV=development&& electron .",
     "build": "electron-builder",
     "build:nsis": "electron-builder --win nsis",
     "build:dir": "electron-builder --win --dir",
@@ -55,7 +55,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Bee Telegram Bot"
+      "shortcutName": "Bee Telegram Bot",
+      "runAfterFinish": true
     },
     "extraResources": [
       {

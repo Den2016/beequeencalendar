@@ -123,7 +123,16 @@ const models = {
             return await dbAsync.run(`UPDATE beeuser SET last_message = CURRENT_TIMESTAMP WHERE tg_id = ?`, [tg_id]);
         },
         findAll: async () => {
-            return await dbAsync.all(`SELECT * FROM beeuser ORDER BY id DESC`);
+               return await dbAsync.all(`
+        SELECT * FROM beeuser 
+        ORDER BY 
+            CASE 
+                WHEN last_message IS NULL THEN 1 
+                ELSE 0 
+            END,
+            last_message DESC,
+            id DESC
+    `);
         }
     },
     BeeParams: {

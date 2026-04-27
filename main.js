@@ -1,8 +1,9 @@
-const { app, Tray, Menu, BrowserWindow, ipcMain } = require('electron');
+const { app, Tray, Menu, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { models } = require('./database');
 const { appRoot, logsDir, assetsDir, ensureDirectories } = require('./paths');
+const { isAutoLaunchEnabled, enableAutoLaunch, disableAutoLaunch, toggleAutoLaunch, showFirstLaunchDialog } = require('./autoLaunch');
 
 let tray = null;
 let mainWindow = null;
@@ -20,7 +21,6 @@ function initLogFile() {
     logFile = path.join(logsDir, `bot-${date}.log`);
 }
 
-// Сохранение лога в память и файл
 function saveLog(level, ...args) {
     const timestamp = new Date().toISOString();
     let message = '';
@@ -49,7 +49,7 @@ function saveLog(level, ...args) {
         stack: stack || null
     };
     
-    logsStore.unshift(logEntry);
+    logsStore.push(logEntry);
     if (logsStore.length > MAX_LOGS) {
         logsStore = logsStore.slice(0, MAX_LOGS);
     }
@@ -129,18 +129,49 @@ ipcMain.handle('get-logs', () => {
     return logsStore;
 });
 
+// ========== IPC ДЛЯ АВТОЗАПУСКА ==========
+ipcMain.handle('get-auto-launch-status', async () => {
+    return await isAutoLaunchEnabled();
+});
+
+ipcMain.handle('set-auto-launch', async (event, enabled) => {
+    const result = await toggleAutoLaunch(enabled);
+    return result;
+});
+
 // ========== ОСТАЛЬНОЙ КОД ==========
 
 const bot = require('./bot');
 const { initScheduler } = require('./scheduler');
 
 function createTray() {
-    const iconPath = path.join(appRoot, 'assets', 'icon.ico');
-    if (fs.existsSync(iconPath)) {
+    // Исправление: проверяем существование assetsDir и иконки
+    let iconPath = null;
+    
+    // Пробуем найти иконку в разных местах
+    const possiblePaths = [
+        assetsDir ? path.join(assetsDir, 'icon.ico') : null,
+        path.join(__dirname, 'assets', 'icon.ico'),
+        path.join(appRoot, 'assets', 'icon.ico'),
+        path.join(process.cwd(), 'assets', 'icon.ico')
+    ];
+    
+    for (const tryPath of possiblePaths) {
+        if (tryPath && fs.existsSync(tryPath)) {
+            iconPath = tryPath;
+            break;
+        }
+    }
+    
+    if (iconPath) {
+        console.log('📁 Using icon from:', iconPath);
         tray = new Tray(iconPath);
     } else {
-        // Если иконки нет, создаем без нее
-        tray = new Tray(path.join(__dirname, 'assets', 'icon.ico'));
+        console.log('⚠️ Icon not found, creating tray without icon');
+        // Создаем простой Tray без иконки (с пустым Image)
+        const { nativeImage } = require('electron');
+        const emptyIcon = nativeImage.createEmpty();
+        tray = new Tray(emptyIcon);
     }
     
     const contextMenu = Menu.buildFromTemplate([
@@ -186,14 +217,16 @@ function showWindow() {
     mainWindow.show();
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
     initLogFile();
     console.log('🐝 Bee Telegram Bot starting...');
     console.log(`📁 Working directory: ${appRoot}`);
     console.log(`📁 Log file: ${logFile}`);
     
     createTray();
+    createWindow(); // Создаем окно сразу для диалогов
     
+    // Запускаем сервер для API мониторинга
     const express = require('express');
     const expressApp = express();
     const port = 3001;
@@ -251,8 +284,13 @@ app.whenReady().then(() => {
         console.log(`📊 Monitor API running on http://localhost:${port}`);
     });
     
+    // Инициализируем планировщик
     initScheduler(bot);
     
+    // Показываем диалог первого запуска для автозапуска (только в собранном приложении)
+    if (app.isPackaged) {
+        await showFirstLaunchDialog(mainWindow);
+    }    
     console.log('✅ Bee Telegram Bot started successfully!');
 });
 

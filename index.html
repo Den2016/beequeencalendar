@@ -129,13 +129,66 @@
             height: 500px;
             overflow-y: auto;
         }
-        .log-entry {
-            padding: 4px 8px;
-            border-bottom: 1px solid #313244;
+        .log-container {
+            background: #11111b;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            height: 500px;
+            overflow-y: auto;
+        }
+
+        /* Табличный вид логов */
+        .log-table {
+            width: 100%;
+            border-collapse: collapse;
             font-family: monospace;
             font-size: 12px;
-            white-space: pre-wrap;
+        }
+
+        .log-table tr {
+            border-bottom: 1px solid #313244;
+        }
+
+        .log-table tr:hover {
+            background: #1e1e2e;
+        }
+
+        .log-table td {
+            padding: 6px 8px;
+            vertical-align: top;
+        }
+
+        .log-timestamp {
+            color: #6c7086;
+            white-space: nowrap;
+            width: 145px;
+        }
+
+        .log-level {
+            font-weight: bold;
+            white-space: nowrap;
+            width: 60px;
+        }
+
+        .log-level.info { color: #89b4fa; }
+        .log-level.warn { color: #f9e2af; }
+        .log-level.error { color: #f38ba8; }
+        .log-level.debug { color: #94e2d5; }
+
+        .log-message {
+            color: #cdd6f4;
             word-break: break-all;
+        }
+
+        .log-stack {
+            margin-top: 4px;
+            padding: 4px 8px;
+            background: #1e1e2e;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #6c7086;
+            white-space: pre-wrap;
         }
         .log-entry.info { color: #cdd6f4; }
         .log-entry.warn { color: #f9e2af; background: rgba(249, 226, 175, 0.1); }
@@ -186,6 +239,26 @@
         ::-webkit-scrollbar-thumb:hover {
             background: #45475a;
         }
+        #autoLaunchSlider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: #cdd6f4;
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+        input:checked + #autoLaunchSlider {
+            background-color: #89b4fa;
+        }
+        input:checked + #autoLaunchSlider:before {
+            transform: translateX(26px);
+        }
+        input:focus + #autoLaunchSlider {
+            box-shadow: 0 0 1px #89b4fa;
+        }        
     </style>
 </head>
 <body>
@@ -198,6 +271,7 @@
             <div class="tab" data-tab="notifications">🔔 Уведомления</div>
             <div class="tab" data-tab="delayed">⏰ Отложенные</div>
             <div class="tab" data-tab="logs">📋 Консоль</div>
+            <div class="tab" data-tab="settings">⚙️ Настройки</div>            
         </div>
         
         <!-- Вкладка Пользователи -->
@@ -270,7 +344,36 @@
             </div>
         </div>
     </div>
-    
+
+    <div id="settings-section" class="section">
+        <h2>⚙️ Настройки программы</h2>
+        
+        <div style="background: #181825; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+            <h3 style="color: #89b4fa; margin-bottom: 15px;">🚀 Автозапуск</h3>
+            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 15px;">
+                <div>
+                    <div style="font-weight: 500; margin-bottom: 5px;">Запускать при старте Windows</div>
+                    <div style="font-size: 12px; color: #6c7086;">Бот будет автоматически запускаться в системном трее</div>
+                </div>
+                <label style="position: relative; display: inline-block; width: 60px; height: 34px;">
+                    <input type="checkbox" id="autoLaunchToggle" style="opacity: 0; width: 0; height: 0;">
+                    <span id="autoLaunchSlider" style="position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #313244; transition: 0.3s; border-radius: 34px;"></span>
+                </label>
+            </div>
+        </div>
+        
+        <div style="background: #181825; border-radius: 8px; padding: 20px;">
+            <h3 style="color: #89b4fa; margin-bottom: 15px;">ℹ️ О программе</h3>
+            <div style="font-size: 13px; line-height: 1.6;">
+                <p><strong>🐝 Bee Telegram Bot</strong> - бот для пчеловодов</p>
+                <p>Версия: 1.0.0</p>
+                <p>Лицензия: GPL-3.0</p>
+                <hr style="border-color: #313244; margin: 10px 0;">
+                <p>📢 Чат для обсуждения: <a href="https://t.me/beequeencalendar_bot_chat" style="color: #89b4fa;">@beequeencalendar_bot_chat</a></p>
+            </div>
+        </div>
+    </div>
+
     <script>
         let currentFilter = 'all';
         let logs = [];
@@ -346,23 +449,29 @@
                 return;
             }
             
-            container.innerHTML = filteredLogs.map(log => {
+            // Используем таблицу вместо div
+            let html = '<table class="log-table"><tbody>';
+            
+            for (let i = filteredLogs.length - 1; i >= 0; i--) {
+                const log = filteredLogs[i];
                 const date = new Date(log.timestamp);
                 const timeStr = date.toLocaleTimeString('ru-RU', { hour12: false });
                 const dateStr = date.toLocaleDateString('ru-RU');
                 
-                let html = `<div class="log-entry ${log.level}">
-                    <span class="log-timestamp">[${dateStr} ${timeStr}]</span>
-                    <span class="log-level ${log.level}">[${log.level.toUpperCase()}]</span>
-                    <span class="log-message">${escapeHtml(log.message)}</span>`;
+                html += `<tr class="log-row">
+                    <td class="log-timestamp">[${dateStr} ${timeStr}]</td>
+                    <td class="log-level ${log.level}">[${log.level.toUpperCase()}]</td>
+                    <td class="log-message">${escapeHtml(log.message)}`;
                 
                 if (log.stack) {
                     html += `<div class="log-stack">${escapeHtml(log.stack)}</div>`;
                 }
                 
-                html += `</div>`;
-                return html;
-            }).join('');
+                html += `</td></tr>`;
+            }
+            
+            html += '</tbody></table>';
+            container.innerHTML = html;
             
             if (autoScroll) {
                 container.scrollTop = container.scrollHeight;
@@ -460,7 +569,44 @@
             div.textContent = text;
             return div.innerHTML;
         }
-        
+       
+        // Инициализация переключателя автозапуска
+            async function initAutoLaunchToggle() {
+                const toggle = document.getElementById('autoLaunchToggle');
+                const slider = document.getElementById('autoLaunchSlider');
+                
+                if (!toggle) return;
+                
+                // Получаем текущий статус
+                const isEnabled = await window.electronAPI.getAutoLaunchStatus();
+                toggle.checked = isEnabled;
+                
+                // Обработчик изменения
+                toggle.addEventListener('change', async (e) => {
+                    const enabled = e.target.checked;
+                    const result = await window.electronAPI.setAutoLaunch(enabled);
+                    
+                    if (!result.success) {
+                        // Если не удалось, возвращаем обратно
+                        toggle.checked = !enabled;
+                        alert('Не удалось изменить настройку автозапуска: ' + result.message);
+                    } else {
+                        console.log(`Auto-launch ${enabled ? 'enabled' : 'disabled'}`);
+                    }
+                });
+            }
+            
+            // Слушаем изменения статуса из main процесса
+            window.electronAPI.onAutoLaunchStatusChanged((status) => {
+                const toggle = document.getElementById('autoLaunchToggle');
+                if (toggle) {
+                    toggle.checked = status;
+                }
+            });
+            
+            // Загружаем настройки при старте
+            initAutoLaunchToggle();        
+
         // Загрузка начальных данных
         loadLogs();
         refreshData();
