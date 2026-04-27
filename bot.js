@@ -5,6 +5,11 @@ const path = require('path');
 
 const bot = new TelegramBot(config.botToken, { polling: true });
 
+bot.deleteWebHook().then(() => {
+   console.log('Старый вебхук удален');
+   // запускайте поллинг здесь, если autoStart: false
+});
+
 // Генератор уникальных ID для отслеживания
 let requestCounter = 0;
 function getRequestId() {
@@ -342,7 +347,7 @@ async function addEvent(tg_id, chat_id, msg_id, date, eventId, typ) {
     // ============================================
     // КОНЕЦ ПРОВЕРКИ
     // ============================================
-    
+
     const subscribe = bp.subscribe;
     const evDate = formatDateForDB(date);
     
