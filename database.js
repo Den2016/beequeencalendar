@@ -1,8 +1,10 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const config = require('./config');
+const fs = require('fs');
+const { dataDir } = require('./paths');
 
-const dbPath = path.join(__dirname, config.dbPath);
+const dbPath = path.join(dataDir, 'bee_calendar.db');
 const db = new sqlite3.Database(dbPath);
 
 // Оборачиваем все методы в промисы для удобства
@@ -41,10 +43,7 @@ const dbAsync = {
     }
 };
 
-// Включение поддержки FOREIGN KEY в SQLite
-dbAsync.exec("PRAGMA foreign_keys = ON;").catch(console.error);
-
-// Создание таблиц с правильной структурой
+// Создание таблиц
 dbAsync.exec(`
     CREATE TABLE IF NOT EXISTS beeuser (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +75,6 @@ dbAsync.exec(`
 
     CREATE TABLE IF NOT EXISTS beesubscribes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        beeparams_id INTEGER NOT NULL,
         tg_id INTEGER,
         chat_id INTEGER,
         msg_id INTEGER,
@@ -84,8 +82,7 @@ dbAsync.exec(`
         tp INTEGER DEFAULT 0,
         eventid INTEGER,
         event TEXT,
-        sent INTEGER DEFAULT 0,
-        FOREIGN KEY (beeparams_id) REFERENCES beeparams(id) ON DELETE CASCADE
+        sent INTEGER DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS beemessages (
@@ -99,83 +96,15 @@ dbAsync.exec(`
     CREATE INDEX IF NOT EXISTS idx_beeparams_tg_chat_msg ON beeparams(tg_id, chat_id, msg_id);
     CREATE INDEX IF NOT EXISTS idx_beesubscribes_dt ON beesubscribes(dt);
     CREATE INDEX IF NOT EXISTS idx_beesubscribes_tg_chat ON beesubscribes(tg_id, chat_id);
-    CREATE INDEX IF NOT EXISTS idx_beesubscribes_beeparams_id ON beesubscribes(beeparams_id);
+    CREATE INDEX IF NOT EXISTS idx_beesubscribes_sent ON beesubscribes(sent);
+    CREATE INDEX IF NOT EXISTS idx_beesubscribes_tp ON beesubscribes(tp);
 `).then(() => {
-    console.log('✅ Database initialized with CASCADE DELETE');
+    console.log('✅ Database initialized at:', dbPath);
 }).catch(err => {
     console.error('❌ Database init error:', err);
 });
 
-// Функция для миграции существующей БД
-async function migrateDatabase() {
-    try {
-        // Проверяем, есть ли колонка beeparams_id в таблице beesubscribes
-        const columns = await dbAsync.all("PRAGMA table_info(beesubscribes);");
-        const hasBeeparamsId = columns.some(col => col.name === 'beeparams_id');
-        
-        if (!hasBeeparamsId) {
-            console.log('🔄 Migrating database: adding beeparams_id foreign key...');
-            
-            await dbAsync.exec("BEGIN TRANSACTION;");
-            await dbAsync.exec("PRAGMA foreign_keys = OFF;");
-            
-            // Получаем текущие данные
-            const subscribes = await dbAsync.all("SELECT * FROM beesubscribes;");
-            
-            // Удаляем старую таблицу beesubscribes
-            await dbAsync.exec("DROP TABLE beesubscribes;");
-            
-            // Создаем новую таблицу с foreign key
-            await dbAsync.exec(`
-                CREATE TABLE beesubscribes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    beeparams_id INTEGER NOT NULL,
-                    tg_id INTEGER,
-                    chat_id INTEGER,
-                    msg_id INTEGER,
-                    dt DATETIME,
-                    tp INTEGER DEFAULT 0,
-                    eventid INTEGER,
-                    event TEXT,
-                    sent INTEGER DEFAULT 0,
-                    FOREIGN KEY (beeparams_id) REFERENCES beeparams(id) ON DELETE CASCADE
-                );
-                CREATE INDEX idx_beesubscribes_dt ON beesubscribes(dt);
-                CREATE INDEX idx_beesubscribes_tg_chat ON beesubscribes(tg_id, chat_id);
-                CREATE INDEX idx_beesubscribes_beeparams_id ON beesubscribes(beeparams_id);
-            `);
-            
-            // Восстанавливаем данные, связывая с beeparams.id
-            for (const sub of subscribes) {
-                // Находим соответствующий beeparams.id
-                const beeparam = await dbAsync.get(
-                    'SELECT id FROM beeparams WHERE tg_id = ? AND chat_id = ? AND msg_id = ?',
-                    [sub.tg_id, sub.chat_id, sub.msg_id]
-                );
-                
-                if (beeparam) {
-                    await dbAsync.run(`
-                        INSERT INTO beesubscribes (id, beeparams_id, tg_id, chat_id, msg_id, dt, tp, eventid, event, sent)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    `, [sub.id, beeparam.id, sub.tg_id, sub.chat_id, sub.msg_id, sub.dt, sub.tp, sub.eventid, sub.event, sub.sent]);
-                }
-            }
-            
-            await dbAsync.exec("COMMIT;");
-            console.log('✅ Database migration completed successfully!');
-        }
-    } catch (err) {
-        console.error('❌ Migration error:', err);
-        await dbAsync.exec("ROLLBACK;");
-    } finally {
-        await dbAsync.exec("PRAGMA foreign_keys = ON;");
-    }
-}
-
-// Запускаем миграцию
-migrateDatabase().catch(console.error);
-
-// Модели с использованием промисов
+// Модели
 const models = {
     BeeUser: {
         findOne: async (where) => {
@@ -185,7 +114,7 @@ const models = {
         },
         create: async (data) => {
             return await dbAsync.run(
-                `INSERT INTO beeuser (tg_id, is_bot, first_name, last_name, username, language_code) 
+                `INSERT OR IGNORE INTO beeuser (tg_id, is_bot, first_name, last_name, username, language_code) 
                  VALUES (?, ?, ?, ?, ?, ?)`,
                 [data.tg_id, data.is_bot, data.first_name, data.last_name, data.username, data.language_code]
             );
@@ -204,14 +133,13 @@ const models = {
             return await dbAsync.get(`SELECT * FROM beeparams WHERE ${conditions}`, values);
         },
         create: async (data) => {
-            const result = await dbAsync.run(
+            return await dbAsync.run(
                 `INSERT INTO beeparams (tg_id, chat_id, msg_id, typ, egg, subscribe, subscribetime, dt, comment, waitfor) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [data.tg_id, data.chat_id, data.msg_id, data.typ || 0, data.egg || null, 
                  data.subscribe !== undefined ? data.subscribe : 2, 
                  data.subscribetime || '08:00', data.dt || null, data.comment || null, data.waitfor || null]
             );
-            return result;
         },
         update: async (id, data) => {
             const fields = Object.keys(data).filter(k => data[k] !== undefined).map(k => `${k} = ?`).join(', ');
@@ -254,29 +182,17 @@ const models = {
             return await dbAsync.run(`DELETE FROM beesubscribes WHERE ${conditions}`, values);
         },
         create: async (data) => {
-            // Сначала получаем beeparams_id
-            const beeparam = await models.BeeParams.findOne({ 
-                tg_id: data.tg_id, 
-                chat_id: data.chat_id, 
-                msg_id: data.msg_id 
-            });
-            
-            if (!beeparam) {
-                console.error('No beeparams found for create:', data);
-                return null;
-            }
-            
             return await dbAsync.run(
-                `INSERT INTO beesubscribes (beeparams_id, tg_id, chat_id, msg_id, dt, eventid, event, tp, sent) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [beeparam.id, data.tg_id, data.chat_id, data.msg_id, data.dt, data.eventid, data.event, data.tp || 0, data.sent || 0]
+                `INSERT INTO beesubscribes (tg_id, chat_id, msg_id, dt, eventid, event, tp, sent) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [data.tg_id, data.chat_id, data.msg_id, data.dt, data.eventid, data.event, data.tp || 0, data.sent || 0]
             );
         },
         findForSummary: async (chat_id, tg_id, dt1, dt2) => {
             return await dbAsync.all(`
                 SELECT s.dt, s.eventid, p.comment 
                 FROM beeparams p
-                LEFT JOIN beesubscribes s ON s.beeparams_id = p.id
+                LEFT JOIN beesubscribes s ON s.msg_id = p.msg_id AND s.tg_id = p.tg_id AND s.chat_id = p.chat_id
                 WHERE s.chat_id = ? AND s.tg_id = ? AND s.eventid IS NOT NULL AND DATE(s.dt) BETWEEN ? AND ?
                 ORDER BY s.dt ASC
             `, [chat_id, tg_id, dt1, dt2]);
@@ -285,7 +201,7 @@ const models = {
             return await dbAsync.all(`
                 SELECT s.*, p.subscribetime, p.comment 
                 FROM beesubscribes s
-                LEFT JOIN beeparams p ON s.beeparams_id = p.id
+                LEFT JOIN beeparams p ON s.msg_id = p.msg_id AND s.tg_id = p.tg_id AND s.chat_id = p.chat_id
                 WHERE s.sent = 0 
                 ORDER BY s.dt ASC
             `);

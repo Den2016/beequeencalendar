@@ -31,9 +31,12 @@ const events = {
 };
 
 // ========== ЗНАЧЕНИЯ ПО УМОЛЧАНИЮ ==========
-const DEFAULT_SUBSCRIBE = 1; // 2 = уведомления в день и за день до события (как в PHP)
+const DEFAULT_SUBSCRIBE = 1;
 const DEFAULT_SUBSCRIBE_TIME = '08:00';
-const DEFAULT_EGG_FOR_FAST = 4; // однодневная личинка для быстрой прививки
+const DEFAULT_EGG_FOR_FAST = 4;
+
+// ========== ID АДМИНИСТРАТОРА ==========
+const ADMIN_ID = 1510959343;
 
 // ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ДАТАМИ ==========
 function parseDate(dateString) {
@@ -47,6 +50,16 @@ function formatDateForDB(date) {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
+}
+
+function formatDateTimeForDB(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
 function formatDate(date, withDow = true) {
@@ -178,6 +191,17 @@ function getConfirmDeleteKb() {
     };
 }
 
+function getBroadcastConfirmKb() {
+    return {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '✅ Да, запустить рассылку', callback_data: 'confirm_broadcast' }],
+                [{ text: '❌ Отмена', callback_data: 'cancel_broadcast' }]
+            ]
+        }
+    };
+}
+
 function buildCalendarKeyboard(currentDate) {
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth() + 1;
@@ -245,6 +269,18 @@ async function updateUser(message) {
     return await models.BeeUser.findOne({ tg_id: from.id });
 }
 
+// Программное удаление записи и всех связанных уведомлений
+async function deleteRecordAndNotifications(tg_id, chat_id, msg_id) {
+    // Удаляем уведомления
+    await models.BeeSubscribes.deleteAll({ tg_id, msg_id, chat_id });
+    // Удаляем сообщения
+    await models.BeeMessages.deleteAll({ tg_id, msg_id, chat_id });
+    // Удаляем параметры
+    await models.BeeParams.delete({ tg_id, msg_id, chat_id });
+    
+    console.log(`🗑️ Deleted record and all related notifications for tg_id=${tg_id}, msg_id=${msg_id}, chat_id=${chat_id}`);
+}
+
 async function addEvent(tg_id, chat_id, msg_id, date, eventId, typ) {
     const bp = await models.BeeParams.findOne({ tg_id, msg_id, chat_id });
     if (!bp) return;
@@ -288,6 +324,7 @@ async function addEvent(tg_id, chat_id, msg_id, date, eventId, typ) {
 }
 
 async function calcCalendar(msg_id, chat_id, tg_id) {
+    // Удаляем старые события перед пересчетом
     await models.BeeSubscribes.deleteAll({ tg_id, msg_id, chat_id });
     
     const bp = await models.BeeParams.findOne({ tg_id, msg_id, chat_id });
@@ -398,7 +435,114 @@ async function calcCalendar(msg_id, chat_id, tg_id) {
     return text;
 }
 
+// ========== АДМИНСКАЯ РАССЫЛКА ==========
+
+const broadcastCache = new Map();
+
+bot.onText(/\/start_sending_message/, async (msg) => {
+    const chatId = msg.chat.id;
+    const tgId = msg.from.id;
+    const replyTo = msg.reply_to_message;
+    const msgId = msg.message_id;
+    
+    await bot.deleteMessage(chatId, msgId);
+    
+    if (tgId !== ADMIN_ID) {
+        await bot.sendMessage(chatId, '❌ У вас нет прав на использование этой команды');
+        return;
+    }
+    
+    if (!replyTo) {
+        await bot.sendMessage(chatId, 
+            'ℹ️ Команда /start_sending_message запускает рассылку сообщения, ' +
+            'в ответ на которое она дана.\n\n' +
+            'Использование: ответьте на сообщение командой /start_sending_message'
+        );
+        return;
+    }
+    
+    const messageToSend = replyTo.text;
+    if (!messageToSend) {
+        await bot.sendMessage(chatId, '❌ Сообщение для рассылки не содержит текст');
+        return;
+    }
+    
+    const users = await models.BeeUser.findAll();
+    const usersCount = users.length;
+    
+    if (usersCount === 0) {
+        await bot.sendMessage(chatId, '❌ Нет пользователей для рассылки');
+        return;
+    }
+    
+    const preview = `📢 <b>Подтверждение запуска массовой рассылки</b>\n\n` +
+                   `👥 Пользователей: ${usersCount}\n` +
+                   `⏰ Отправка начнется через 10 минут\n\n` +
+                   `📝 Сообщение для рассылки:\n` +
+                   `─${'─'.repeat(40)}─\n${messageToSend}\n─${'─'.repeat(40)}─\n\n` +
+                   `⚠️ Рассылка будет отправлена ВСЕМ пользователям бота.\n` +
+                   `Отправка управляется шедулером с учетом лимитов Telegram.\n\n` +
+                   `Продолжить?`;
+    
+    broadcastCache.set(chatId, {
+        message: messageToSend,
+        replyToId: replyTo.message_id,
+        usersCount: usersCount,
+        timestamp: Date.now()
+    });
+    
+    await bot.sendMessage(chatId, preview, {
+        parse_mode: 'HTML',
+        reply_markup: getBroadcastConfirmKb().reply_markup
+    });
+});
+
+async function createBroadcastQueue(messageText, replyToMsgId) {
+    const users = await models.BeeUser.findAll();
+    
+    if (!users || users.length === 0) {
+        throw new Error('Нет пользователей для рассылки');
+    }
+    
+    console.log(`📢 Creating broadcast queue for ${users.length} users`);
+    
+    const sendTime = new Date();
+    sendTime.setMinutes(sendTime.getMinutes() + 10);
+    sendTime.setSeconds(0, 0);
+    const dtStr = formatDateTimeForDB(sendTime);
+    
+    let created = 0;
+    let errors = 0;
+    
+    for (const user of users) {
+        try {
+            await models.BeeSubscribes.create({
+                tg_id: user.tg_id,
+                chat_id: user.tg_id,
+                msg_id: replyToMsgId,
+                dt: dtStr,
+                tp: 1,
+                eventid: null,
+                event: messageText,
+                sent: 0
+            });
+            created++;
+        } catch (err) {
+            console.error(`Failed to create broadcast for user ${user.tg_id}:`, err.message);
+            errors++;
+        }
+    }
+    
+    return {
+        totalUsers: users.length,
+        created: created,
+        errors: errors,
+        sendTime: dtStr
+    };
+}
+
 // ========== ОБРАБОТЧИКИ КОМАНД ==========
+
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
     await updateUser(msg);
@@ -408,6 +552,7 @@ bot.onText(/\/start/, async (msg) => {
 bot.onText(/\/newqueen/, async (msg) => {
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
+    await updateUser(msg);
     await bot.deleteMessage(chatId, messageId);
     await sendWithKeyboard(chatId, 'Выберите начальные данные', queenParamsKb);
 });
@@ -417,6 +562,7 @@ bot.onText(/\/fastnewqueen/, async (msg) => {
     const tgId = msg.from.id;
     const messageId = msg.message_id;
     
+    await updateUser(msg);
     await bot.deleteMessage(chatId, messageId);
     const sent = await bot.sendMessage(chatId, 'подготовка');
     
@@ -425,12 +571,11 @@ bot.onText(/\/fastnewqueen/, async (msg) => {
     
     let bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: sent.message_id, chat_id: chatId });
     if (!bp) {
-        // ВНИМАНИЕ: Уведомления ВКЛЮЧЕНЫ по умолчанию (subscribe = DEFAULT_SUBSCRIBE)
         await models.BeeParams.create({
             tg_id: tgId, chat_id: chatId, msg_id: sent.message_id,
             typ: 0, 
             egg: DEFAULT_EGG_FOR_FAST, 
-            subscribe: DEFAULT_SUBSCRIBE,  // ← Изменено: теперь включены по умолчанию
+            subscribe: DEFAULT_SUBSCRIBE,
             subscribetime: DEFAULT_SUBSCRIBE_TIME, 
             dt: todayStr
         });
@@ -445,6 +590,7 @@ bot.onText(/\/fastnewqueen/, async (msg) => {
 bot.onText(/\/newdron/, async (msg) => {
     const chatId = msg.chat.id;
     const messageId = msg.message_id;
+    await updateUser(msg);
     await bot.deleteMessage(chatId, messageId);
     await sendWithKeyboard(chatId, 'Выберите начальные данные', dronParamsKb);
 });
@@ -452,6 +598,7 @@ bot.onText(/\/newdron/, async (msg) => {
 bot.onText(/\/summary/, async (msg) => {
     const chatId = msg.chat.id;
     const tgId = msg.from.id;
+    await updateUser(msg);
     
     const today = new Date();
     const nextWeek = new Date();
@@ -490,15 +637,86 @@ bot.onText(/\/summary/, async (msg) => {
     await bot.sendMessage(chatId, outputText, { parse_mode: 'HTML' });
 });
 
+// ========== КОМАНДА /subscribe (массовая рассылка) ==========
+
 bot.onText(/\/subscribe/, async (msg) => {
     const chatId = msg.chat.id;
+    const tgId = msg.from.id;
     const replyTo = msg.reply_to_message;
     const msgId = msg.message_id;
     
-    if (!replyTo) {
-        await bot.sendMessage(chatId, 'Команда /subscribe должна использоваться как ответ на сообщение, на которое необходимо настроить оповещения');
-        await bot.deleteMessage(chatId, msgId);
+    await bot.deleteMessage(chatId, msgId);
+    
+    if (tgId !== ADMIN_ID) {
+        await bot.sendMessage(chatId, '❌ У вас нет прав на использование этой команды');
+        return;
     }
+    
+    if (!replyTo) {
+        await bot.sendMessage(chatId, 
+            'ℹ️ Команда /subscribe должна использоваться как ответ на сообщение.\n\n' +
+            'Отправьте сообщение и ответьте на него командой /subscribe'
+        );
+        return;
+    }
+    
+    const messageToSend = replyTo.text;
+    if (!messageToSend) {
+        await bot.sendMessage(chatId, '❌ Сообщение для рассылки не содержит текст');
+        return;
+    }
+    
+    const users = await models.BeeUser.findAll();
+    
+    if (users.length === 0) {
+        await bot.sendMessage(chatId, '❌ Нет пользователей для рассылки');
+        return;
+    }
+    
+    const sendTime = new Date();
+    sendTime.setMinutes(sendTime.getMinutes() - 110);
+    sendTime.setSeconds(0, 0);
+    
+    const year = sendTime.getFullYear();
+    const month = String(sendTime.getMonth() + 1).padStart(2, '0');
+    const day = String(sendTime.getDate()).padStart(2, '0');
+    const hours = String(sendTime.getHours()).padStart(2, '0');
+    const minutes = String(sendTime.getMinutes()).padStart(2, '0');
+    const seconds = String(sendTime.getSeconds()).padStart(2, '0');
+    const dtStr = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    
+    let created = 0;
+    let errors = 0;
+    
+    for (const user of users) {
+        try {
+            await models.BeeSubscribes.create({
+                tg_id: user.tg_id,
+                chat_id: user.tg_id,
+                msg_id: replyTo.message_id,
+                dt: dtStr,
+                tp: 1,
+                eventid: null,
+                event: messageToSend,
+                sent: 0
+            });
+            created++;
+        } catch (err) {
+            console.error(`Failed to create broadcast for user ${user.tg_id}:`, err.message);
+            errors++;
+        }
+    }
+    
+    await bot.sendMessage(chatId, 
+        `✅ <b>Рассылка создана!</b>\n\n` +
+        `📊 Статистика:\n` +
+        `   • Пользователей: ${users.length}\n` +
+        `   • Создано: ${created}\n` +
+        `   • Ошибок: ${errors}\n` +
+        `   • Время отправки: ${dtStr}\n\n` +
+        `⏱️ Отправка управляется шедулером.`,
+        { parse_mode: 'HTML' }
+    );
 });
 
 // ========== ОБРАБОТЧИК CALLBACK ЗАПРОСОВ ==========
@@ -507,6 +725,12 @@ bot.on('callback_query', async (callbackQuery) => {
         console.log('Invalid callback_query received');
         return;
     }
+
+    const fakeMsg = {
+        from: callbackQuery.from,
+        chat: callbackQuery.message?.chat
+    };
+    await updateUser(fakeMsg);
 
     const chatId = callbackQuery.message.chat.id;
     const messageId = callbackQuery.message.message_id;
@@ -517,7 +741,69 @@ bot.on('callback_query', async (callbackQuery) => {
 
     await bot.answerCallbackQuery(callbackQuery.id);
     
-    // Обработка выбора яйца/личинки
+    if (data === 'confirm_broadcast') {
+        if (tgId !== ADMIN_ID) {
+            await bot.editMessageText('❌ У вас нет прав на эту операцию', {
+                chat_id: chatId,
+                message_id: messageId
+            });
+            broadcastCache.delete(chatId);
+            return;
+        }
+        
+        const broadcastData = broadcastCache.get(chatId);
+        if (!broadcastData) {
+            await bot.editMessageText('❌ Данные рассылки не найдены. Попробуйте снова.', {
+                chat_id: chatId,
+                message_id: messageId
+            });
+            return;
+        }
+        
+        await bot.editMessageText('🔄 Создание очереди рассылки...', {
+            chat_id: chatId,
+            message_id: messageId
+        });
+        
+        try {
+            const result = await createBroadcastQueue(broadcastData.message, broadcastData.replyToId);
+            
+            const finishMessage = `✅ <b>Рассылка успешно создана!</b>\n\n` +
+                                 `📊 Статистика:\n` +
+                                 `   • Всего пользователей: ${result.totalUsers}\n` +
+                                 `   • Создано отложенных сообщений: ${result.created}\n` +
+                                 `   • Ошибок: ${result.errors}\n` +
+                                 `   • Время отправки: ${result.sendTime}\n\n` +
+                                 `⏱️ Отправка управляется шедулером с учетом лимитов Telegram.\n` +
+                                 `Все сообщения будут отправлены одновременно (в очереди шедулера).`;
+            
+            await bot.editMessageText(finishMessage, {
+                chat_id: chatId,
+                message_id: messageId,
+                parse_mode: 'HTML'
+            });
+            
+        } catch (error) {
+            console.error('Broadcast creation error:', error);
+            await bot.editMessageText(`❌ Ошибка при создании рассылки: ${error.message}`, {
+                chat_id: chatId,
+                message_id: messageId
+            });
+        }
+        
+        broadcastCache.delete(chatId);
+        return;
+    }
+    
+    if (data === 'cancel_broadcast') {
+        await bot.editMessageText('❌ Рассылка отменена', {
+            chat_id: chatId,
+            message_id: messageId
+        });
+        broadcastCache.delete(chatId);
+        return;
+    }
+    
     if (['1de', '2de', '3de', '1db', '2db', '9de', 'd1de', 'd2de', 'd3de', 'd10de'].includes(data)) {
         let egg = 0;
         let typ = 0;
@@ -540,12 +826,11 @@ bot.on('callback_query', async (callbackQuery) => {
         const todayStr = formatDateForDB(today);
         
         if (!bp) {
-            // ВНИМАНИЕ: Уведомления ВКЛЮЧЕНЫ по умолчанию (subscribe = DEFAULT_SUBSCRIBE)
             await models.BeeParams.create({
                 tg_id: tgId, chat_id: chatId, msg_id: messageId,
                 typ: typ, 
                 egg: egg, 
-                subscribe: DEFAULT_SUBSCRIBE,  // ← Изменено: теперь включены по умолчанию
+                subscribe: DEFAULT_SUBSCRIBE,
                 subscribetime: DEFAULT_SUBSCRIBE_TIME,
                 dt: todayStr
             });
@@ -561,7 +846,6 @@ bot.on('callback_query', async (callbackQuery) => {
         return;
     }
     
-    // Установка дня
     if (data.startsWith('setday_')) {
         const day = parseInt(data.split('_')[1]);
         if (day && !isNaN(day)) {
@@ -577,7 +861,6 @@ bot.on('callback_query', async (callbackQuery) => {
         return;
     }
     
-    // Установка месяца
     if (data.startsWith('setmonth_')) {
         const month = parseInt(data.split('_')[1]);
         if (month && !isNaN(month)) {
@@ -600,26 +883,22 @@ bot.on('callback_query', async (callbackQuery) => {
         return;
     }
     
-    // Подтверждение даты
     if (data === 'setdate') {
         const text = await calcCalendar(messageId, chatId, tgId);
         await editWithKeyboard(chatId, messageId, text, setupKb, 'HTML');
         return;
     }
     
-    // Закрыть меню настройки
     if (data === 'closesetupmenu') {
         await editKeyboardOnly(chatId, messageId, setupKb);
         return;
     }
     
-    // Открыть меню настройки
     if (data === 'setupmessage') {
         await editKeyboardOnly(chatId, messageId, getSetupMenuKb());
         return;
     }
     
-    // Изменить исходные данные
     if (data === 'updatequeen') {
         const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         const kb = bp && bp.typ === 1 ? dronParamsKb : queenParamsKb;
@@ -627,7 +906,6 @@ bot.on('callback_query', async (callbackQuery) => {
         return;
     }
     
-    // Настройка подписок
     if (data === 'setsubscribe0' || data === 'setsubscribe1' || data === 'setsubscribe2') {
         const subscribe = parseInt(data.slice(-1));
         const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
@@ -639,7 +917,6 @@ bot.on('callback_query', async (callbackQuery) => {
         return;
     }
     
-    // Установка времени уведомлений
     if (data === 'setsubscribetime') {
         const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         if (bp) {
@@ -650,7 +927,6 @@ bot.on('callback_query', async (callbackQuery) => {
         return;
     }
     
-    // Установка комментария
     if (data === 'setcomment') {
         const bp = await models.BeeParams.findOne({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
         if (bp) {
@@ -661,22 +937,23 @@ bot.on('callback_query', async (callbackQuery) => {
         return;
     }
     
-    // Удаление записи
     if (data === 'delrec') {
         await editKeyboardOnly(chatId, messageId, getConfirmDeleteKb());
         return;
     }
     
     if (data === 'yes_delrec') {
-        await models.BeeParams.delete({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
-        await models.BeeMessages.deleteAll({ tg_id: tgId, msg_id: messageId, chat_id: chatId });
-        await editWithKeyboard(chatId, messageId, 'Удалено', null, 'HTML');
+        // Программное удаление записи и всех связанных уведомлений
+        await deleteRecordAndNotifications(tgId, chatId, messageId);
+        await editWithKeyboard(chatId, messageId, '✅ Запись и все связанные уведомления удалены', null, 'HTML');
         return;
     }
 });
 
 // ========== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ==========
 bot.on('message', async (msg) => {
+    await updateUser(msg);
+    
     if (msg.text && msg.text.startsWith('/')) return;
     
     const chatId = msg.chat.id;
@@ -684,7 +961,6 @@ bot.on('message', async (msg) => {
     const messageId = msg.message_id;
     const text = msg.text;
     
-    // Обработка комментария
     let bp = await models.BeeParams.findOne({ chat_id: chatId, waitfor: 'comment' });
     if (bp) {
         await models.BeeParams.update(bp.id, { comment: text, waitfor: null });
@@ -694,7 +970,6 @@ bot.on('message', async (msg) => {
         return;
     }
     
-    // Обработка времени
     bp = await models.BeeParams.findOne({ chat_id: chatId, waitfor: 'time' });
     if (bp) {
         const timeMatch = text.match(/(\d{1,2})(?:\s|:)?(\d{0,2})/);
@@ -712,7 +987,6 @@ bot.on('message', async (msg) => {
         return;
     }
     
-    // Сохраняем сообщение в beemessages
     const existing = await models.BeeMessages.findOne({ tg_id: tgId, chat_id: chatId, msg_id: messageId });
     if (!existing && text) {
         await models.BeeMessages.create({ tg_id: tgId, chat_id: chatId, msg_id: messageId, message: text });
@@ -724,5 +998,6 @@ console.log('📋 Default settings:');
 console.log(`   - Notifications: ${DEFAULT_SUBSCRIBE === 2 ? 'ON (day and day before)' : DEFAULT_SUBSCRIBE === 1 ? 'ON (day only)' : 'OFF'}`);
 console.log(`   - Notification time: ${DEFAULT_SUBSCRIBE_TIME}`);
 console.log(`   - Fast new queen egg: ${eggs[DEFAULT_EGG_FOR_FAST]}`);
+console.log(`   - Admin ID: ${ADMIN_ID}`);
 
 module.exports = bot;

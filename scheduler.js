@@ -5,11 +5,34 @@ const config = require('./config');
 let bot = null;
 let isProcessing = false;
 
-// Хранилище для отслеживания уже обработанных за сегодня уведомлений
-// Это предотвращает дублирование при нескольких запусках
-const processedToday = new Set();
+const LIMITS = {
+    MESSAGES_PER_SECOND: 30,
+    DELAY_BETWEEN_MSGS: 35,
+    MAX_SEND_TIME_MS: 40000,
+    DEFAULT_RETRY_AFTER_MS: 5000,
+    MAX_RETRIES: 3
+};
 
-// Очищаем хранилище каждый день в 00:00
+const SendStatus = {
+    SUCCESS: 'success',
+    RATE_LIMIT: 'rate_limit',
+    BLOCKED: 'blocked',
+    ERROR: 'error'
+};
+
+const processedToday = new Map();
+let stats = {
+    calendarSent: 0,
+    delayedSent: 0,
+    calendarSkipped: 0,
+    delayedSkipped: 0,
+    rateLimits: 0,
+    blocked: 0,
+    errors: 0,
+    startTime: null,
+    endTime: null
+};
+
 function resetProcessedToday() {
     const now = new Date();
     const tomorrow = new Date(now);
@@ -20,49 +43,14 @@ function resetProcessedToday() {
     setTimeout(() => {
         processedToday.clear();
         console.log('🔄 Processed notifications cache cleared for new day');
-        resetProcessedToday(); // Рекурсивно устанавливаем следующий сброс
+        resetProcessedToday();
     }, msUntilTomorrow);
 }
 
-function initScheduler(telegramBot) {
-    bot = telegramBot;
-    
-    // Запускаем сброс кэша в полночь
-    resetProcessedToday();
-    
-    // Запускаем задачу каждую минуту
-    cron.schedule('* * * * *', async () => {
-        if (isProcessing) {
-            console.log('⚠️ Previous notification run still in progress, skipping...');
-            return;
-        }
-        
-        isProcessing = true;
-        try {
-            console.log('🕐 Running notification scheduler...');
-            await processNotifications();
-        } catch (error) {
-            console.error('❌ Error in notification scheduler:', error);
-        } finally {
-            isProcessing = false;
-        }
-    });
-    
-    // Дополнительно: запускаем проверку пропущенных уведомлений при старте
-    setTimeout(async () => {
-        console.log('🔍 Running missed notifications check on startup...');
-        await checkMissedNotifications();
-    }, 5000); // Задержка 5 секунд после запуска
-    
-    console.log('✅ Notification scheduler started (runs every minute)');
-}
-
-// Функция для получения текущего московского времени
 function getMoscowTime() {
     return new Date(new Date().toLocaleString('en-US', { timeZone: config.timezone }));
 }
 
-// Функция для форматирования даты в YYYY-MM-DD
 function formatDate(date) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -70,23 +58,277 @@ function formatDate(date) {
     return `${year}-${month}-${day}`;
 }
 
-// Функция для форматирования даты и времени в YYYY-MM-DD HH:MM
 function formatDateTime(date) {
     const dateStr = formatDate(date);
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
-    return `${dateStr} ${hours}:${minutes}`;
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${dateStr} ${hours}:${minutes}:${seconds}`;
 }
 
-// Функция для проверки и отправки пропущенных уведомлений
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isTimeoutExceeded(startTime) {
+    return (Date.now() - startTime) >= LIMITS.MAX_SEND_TIME_MS;
+}
+
+function parseRetryAfter(error) {
+    const match = error.message.match(/retry after (\d+)/i);
+    if (match) {
+        return parseInt(match[1]) * 1000;
+    }
+    return LIMITS.DEFAULT_RETRY_AFTER_MS;
+}
+
+async function sendSingleMessage(notification, text, isCalendar = true, retryCount = 0) {
+    try {
+        const options = { parse_mode: 'HTML' };
+        if (isCalendar && notification.msg_id) {
+            options.reply_to_message_id = notification.msg_id;
+        }
+        
+        const result = await bot.sendMessage(notification.chat_id, text, options);
+        
+        if (result && result.message_id) {
+            await dbAsync.run(`UPDATE beesubscribes SET sent = 1 WHERE id = ?`, [notification.id]);
+            return { status: SendStatus.SUCCESS };
+        }
+        return { status: SendStatus.ERROR, error: 'No result from Telegram' };
+        
+    } catch (error) {
+        const errorMsg = error.message || String(error);
+        
+        if (errorMsg.includes('429') || errorMsg.includes('Too Many Requests')) {
+            const retryAfter = parseRetryAfter(error);
+            console.log(`⚠️ Rate limit (429) for chat ${notification.chat_id}, retry after ${retryAfter/1000}s`);
+            return { status: SendStatus.RATE_LIMIT, retryAfter };
+        }
+        
+        const blockedKeywords = [
+            'bot was blocked', 'blocked by the user', 'user is deactivated',
+            'chat not found', 'Forbidden', 'bot was kicked', 'user not found',
+            'бот заблокирован', 'пользователь деактивирован', 'чат не найден'
+        ];
+        
+        const isBlocked = blockedKeywords.some(keyword => 
+            errorMsg.toLowerCase().includes(keyword.toLowerCase())
+        );
+        
+        if (isBlocked) {
+            await dbAsync.run(`UPDATE beesubscribes SET sent = 1 WHERE id = ?`, [notification.id]);
+            console.log(`🚫 User blocked, notification marked as sent for chat ${notification.chat_id}`);
+            return { status: SendStatus.BLOCKED };
+        }
+        
+        if (retryCount < LIMITS.MAX_RETRIES) {
+            console.log(`⚠️ Temporary error for chat ${notification.chat_id}: ${errorMsg}, retry ${retryCount + 1}/${LIMITS.MAX_RETRIES}`);
+            await delay(1000 * (retryCount + 1));
+            return await sendSingleMessage(notification, text, isCalendar, retryCount + 1);
+        }
+        
+        console.error(`❌ Failed to send to ${notification.chat_id} after ${LIMITS.MAX_RETRIES} retries:`, errorMsg);
+        return { status: SendStatus.ERROR, error: errorMsg };
+    }
+}
+
+async function sendNotifications(notifications, type, startTime) {
+    let sent = 0;
+    let rateLimited = false;
+    
+    for (let i = 0; i < notifications.length; i++) {
+        if (isTimeoutExceeded(startTime)) {
+            console.log(`⏰ Timeout reached after ${Date.now() - startTime}ms, stopping ${type}`);
+            break;
+        }
+        
+        const notification = notifications[i];
+        const notifKey = `${notification.id}_${notification.chat_id}`;
+        
+        if (processedToday.has(notifKey)) {
+            console.log(`⏭️ Skipping duplicate ${type} notification ${notification.id}`);
+            stats[type === 'calendar' ? 'calendarSkipped' : 'delayedSkipped']++;
+            continue;
+        }
+        
+        let text = notification.event;
+        if (type === 'calendar' && notification.comment && notification.comment.trim() !== '') {
+            text += `\n\n<b><i>комментарий</i></b>\n\n${notification.comment}`;
+        } else if (type === 'calendar') {
+            text += `\n\n(комментарий к прививке не указан)`;
+        }
+        
+        console.log(`📨 [${sent + 1}/${notifications.length}] ${type === 'calendar' ? 'Calendar' : 'Delayed'} to ${notification.chat_id}`);
+        
+        const result = await sendSingleMessage(notification, text, type === 'calendar');
+        
+        if (result.status === SendStatus.SUCCESS) {
+            processedToday.set(notifKey, Date.now());
+            sent++;
+            if (type === 'calendar') stats.calendarSent++;
+            else stats.delayedSent++;
+        } else if (result.status === SendStatus.RATE_LIMIT) {
+            stats.rateLimits++;
+            rateLimited = true;
+            break;
+        } else if (result.status === SendStatus.BLOCKED) {
+            stats.blocked++;
+        } else {
+            stats.errors++;
+        }
+        
+        await delay(LIMITS.DELAY_BETWEEN_MSGS);
+    }
+    
+    return { sent, rateLimited };
+}
+
+async function getReadyCalendarNotifications(currentMoscowDate, currentHour, currentMinute) {
+    const calendarNotifications = await dbAsync.all(`
+        SELECT s.*, COALESCE(p.subscribetime, ?) as subscribetime, p.comment 
+        FROM beesubscribes s
+        LEFT JOIN beeparams p ON s.msg_id = p.msg_id 
+            AND s.tg_id = p.tg_id 
+            AND s.chat_id = p.chat_id
+        WHERE DATE(s.dt) = ? 
+            AND s.tp = 0
+            AND s.sent = 0
+        ORDER BY 
+            CASE 
+                WHEN s.eventid = 1 THEN 1
+                WHEN s.eventid = 4 THEN 2
+                ELSE 3
+            END,
+            s.dt ASC
+    `, [config.notificationTime, currentMoscowDate]);
+    
+    const readyNotifications = [];
+    for (const notification of calendarNotifications) {
+        const notificationTime = notification.subscribetime || '08:00';
+        const [hours, minutes] = notificationTime.split(':');
+        const notificationTotalMinutes = parseInt(hours) * 60 + parseInt(minutes);
+        const currentTotalMinutes = currentHour * 60 + currentMinute;
+        const timeDiff = currentTotalMinutes - notificationTotalMinutes;
+        
+        if (timeDiff >= 0 && timeDiff < 120) {
+            readyNotifications.push(notification);
+        }
+    }
+    
+    return readyNotifications;
+}
+
+async function getPendingDelayedMessages(moscowNow) {
+    return await dbAsync.all(`
+        SELECT * FROM beesubscribes 
+        WHERE tp = 1 
+            AND sent = 0
+            AND datetime(dt) <= datetime(?)
+        ORDER BY dt ASC
+    `, [formatDateTime(moscowNow)]);
+}
+
+async function cleanupOldNotifications(moscowNow) {
+    const weekAgo = new Date(moscowNow);
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const weekAgoStr = formatDate(weekAgo);
+    
+    const deleted = await dbAsync.run(`
+        DELETE FROM beesubscribes 
+        WHERE sent = 1 
+            AND DATE(dt) <= ?
+    `, [weekAgoStr]);
+    
+    if (deleted.changes > 0) {
+        console.log(`🧹 Cleaned up ${deleted.changes} old sent notifications`);
+    }
+}
+
+function printStats() {
+    const duration = stats.endTime - stats.startTime;
+    console.log(`\n${'─'.repeat(50)}`);
+    console.log(`📊 Run statistics (${duration}ms):`);
+    console.log(`   ✅ Calendar sent:     ${stats.calendarSent}`);
+    console.log(`   ✅ Delayed sent:      ${stats.delayedSent}`);
+    console.log(`   ⏭️ Skipped:           ${stats.calendarSkipped}`);
+    console.log(`   🚫 Blocked users:     ${stats.blocked}`);
+    console.log(`   ⏸️ Rate limits:       ${stats.rateLimits}`);
+    console.log(`   ❌ Other errors:      ${stats.errors}`);
+    console.log(`${'─'.repeat(50)}\n`);
+}
+
+async function processNotifications() {
+    stats = {
+        calendarSent: 0,
+        delayedSent: 0,
+        calendarSkipped: 0,
+        delayedSkipped: 0,
+        rateLimits: 0,
+        blocked: 0,
+        errors: 0,
+        startTime: Date.now(),
+        endTime: null
+    };
+    
+    const startTime = stats.startTime;
+    
+    try {
+        const moscowNow = getMoscowTime();
+        const currentMoscowDate = formatDate(moscowNow);
+        const currentHour = moscowNow.getHours();
+        const currentMinute = moscowNow.getMinutes();
+        
+        console.log(`\n${'='.repeat(50)}`);
+        console.log(`🕐 Notification run at ${formatDateTime(moscowNow)}`);
+        console.log(`${'='.repeat(50)}`);
+        
+        const readyCalendar = await getReadyCalendarNotifications(currentMoscowDate, currentHour, currentMinute);
+        console.log(`📅 Calendar ready: ${readyCalendar.length}`);
+        
+        if (readyCalendar.length > 0) {
+            const result = await sendNotifications(readyCalendar, 'calendar', startTime);
+            if (result.rateLimited) {
+                console.log(`⏸️ Rate limit hit, stopping run`);
+                stats.endTime = Date.now();
+                printStats();
+                return;
+            }
+        }
+        
+        if (!isTimeoutExceeded(startTime)) {
+            const pendingDelayed = await getPendingDelayedMessages(moscowNow);
+            console.log(`⏰ Delayed pending: ${pendingDelayed.length}`);
+            
+            if (pendingDelayed.length > 0) {
+                await sendNotifications(pendingDelayed, 'delayed', startTime);
+            }
+        } else {
+            console.log(`⏰ Timeout before delayed messages, skipping`);
+        }
+        
+        await cleanupOldNotifications(moscowNow);
+        
+        stats.endTime = Date.now();
+        printStats();
+        
+    } catch (error) {
+        console.error('❌ Fatal error in notification scheduler:', error);
+        stats.endTime = Date.now();
+        printStats();
+    }
+}
+
 async function checkMissedNotifications() {
     const moscowNow = getMoscowTime();
     const currentMoscowDate = formatDate(moscowNow);
-    const currentTime = `${String(moscowNow.getHours()).padStart(2, '0')}:${String(moscowNow.getMinutes()).padStart(2, '0')}`;
     
-    console.log(`🔍 Checking for missed notifications at ${currentMoscowDate} ${currentTime}`);
+    console.log(`🔍 Checking for missed notifications at ${formatDateTime(moscowNow)}`);
     
-    // Получаем все неотправленные уведомления за сегодня
+    const fiveMinutesAgo = new Date(moscowNow);
+    fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
+    const fiveMinutesAgoStr = formatDateTime(fiveMinutesAgo);
+    
     const missedNotifications = await dbAsync.all(`
         SELECT s.*, p.subscribetime, p.comment 
         FROM beesubscribes s
@@ -96,215 +338,64 @@ async function checkMissedNotifications() {
         WHERE DATE(s.dt) = ? 
             AND s.tp = 0
             AND s.sent = 0
-    `, [currentMoscowDate]);
+            AND datetime(s.dt) <= datetime(?)
+        ORDER BY s.id ASC
+        LIMIT 100
+    `, [currentMoscowDate, fiveMinutesAgoStr]);
     
-    console.log(`Found ${missedNotifications.length} pending notifications for today`);
-    
-    let sentCount = 0;
-    
-    for (const notification of missedNotifications) {
-        const notificationTime = notification.subscribetime || '08:00';
-        const [hours, minutes] = notificationTime.split(':');
+    if (missedNotifications.length > 0) {
+        console.log(`⚠️ Found ${missedNotifications.length} potentially missed notifications`);
         
-        // Создаем объект Date для времени уведомления
-        const notificationDateTime = new Date(moscowNow);
-        notificationDateTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
-        
-        // Если текущее время больше времени уведомления ИЛИ прошло менее 2 часов с момента уведомления
-        // Это позволяет отправить пропущенные уведомления в течение 2 часов после назначенного времени
-        const timeDiff = moscowNow - notificationDateTime;
-        const isMissed = timeDiff > 0 && timeDiff < 2 * 60 * 60 * 1000; // В течение 2 часов после времени уведомления
-        
-        if (isMissed) {
-            const minutesMissed = Math.floor(timeDiff / 60000);
-            console.log(`📨 Sending MISSED notification (${minutesMissed} min late) to chat ${notification.chat_id} (scheduled for ${notificationTime})`);
+        const startTime = Date.now();
+        for (const notification of missedNotifications) {
+            if (isTimeoutExceeded(startTime)) break;
             
             let text = notification.event;
+            text = `⏰ <i>Уведомление с опозданием (пропущено)</i>\n\n${text}`;
+            
             if (notification.comment && notification.comment.trim() !== '') {
                 text += `\n\n<b><i>комментарий</i></b>\n\n${notification.comment}`;
             }
             
-            // Добавляем пометку о задержке
-            text = `⚠️ <b>Уведомление с опозданием (${minutesMissed} мин.)</b>\n\n${text}`;
-            
-            try {
-                const result = await bot.sendMessage(notification.chat_id, text, {
-                    parse_mode: 'HTML',
-                    reply_to_message_id: notification.msg_id
-                });
-                
-                if (result && result.message_id) {
-                    await dbAsync.run(`UPDATE beesubscribes SET sent = 1 WHERE id = ?`, [notification.id]);
-                    console.log(`✅ Missed notification sent for chat ${notification.chat_id}`);
-                    sentCount++;
-                }
-            } catch (error) {
-                console.error(`❌ Failed to send missed notification to ${notification.chat_id}:`, error.message);
-                // Если бот заблокирован, помечаем как отправленное, чтобы не спамить
-                if (error.message.includes('bot was blocked') || error.message.includes('chat not found')) {
-                    await dbAsync.run(`UPDATE beesubscribes SET sent = 1 WHERE id = ?`, [notification.id]);
-                    console.log(`⚠️ User blocked, notification marked as sent for chat ${notification.chat_id}`);
-                }
+            const result = await sendSingleMessage(notification, text, true);
+            if (result.status === SendStatus.RATE_LIMIT) {
+                console.log(`⚠️ Rate limit while catching up missed notifications, stopping`);
+                break;
             }
+            await delay(LIMITS.DELAY_BETWEEN_MSGS);
         }
     }
+}
+
+function initScheduler(telegramBot) {
+    bot = telegramBot;
+    resetProcessedToday();
     
-    if (sentCount > 0) {
-        console.log(`📬 Sent ${sentCount} missed notifications`);
-    }
+    cron.schedule('* * * * *', async () => {
+        if (isProcessing) {
+            console.log('⚠️ Previous notification run still in progress, skipping...');
+            return;
+        }
+        
+        isProcessing = true;
+        try {
+            await processNotifications();
+        } catch (error) {
+            console.error('❌ Error in notification scheduler:', error);
+        } finally {
+            isProcessing = false;
+        }
+    });
+    
+    setTimeout(async () => {
+        console.log('🔍 Running missed notifications check on startup...');
+        await checkMissedNotifications();
+    }, 5000);
+    
+    console.log('✅ Notification scheduler started (runs every minute)');
+    console.log(`📊 Limits: ${LIMITS.MESSAGES_PER_SECOND} msg/sec, ${LIMITS.DELAY_BETWEEN_MSGS}ms delay`);
+    console.log(`⏱️ Max send time per run: ${LIMITS.MAX_SEND_TIME_MS/1000}s`);
+    console.log(`🔄 Max retries per message: ${LIMITS.MAX_RETRIES}`);
 }
 
-async function processNotifications() {
-    try {
-        const moscowNow = getMoscowTime();
-        const currentMoscowDate = formatDate(moscowNow);
-        const currentHour = moscowNow.getHours();
-        const currentMinute = moscowNow.getMinutes();
-        const currentTimeFormatted = `${String(currentHour).padStart(2, '0')}:${String(currentMinute).padStart(2, '0')}`;
-        
-        console.log(`[${new Date().toISOString()}] Checking notifications for Moscow time: ${currentMoscowDate} ${currentTimeFormatted}`);
-        
-        // Тип 1: Уведомления из календаря (tp=0)
-        // Используем LEFT JOIN вместо INNER JOIN, чтобы включить записи без комментариев
-        const notifications = await dbAsync.all(`
-            SELECT s.*, COALESCE(p.subscribetime, ?) as subscribetime, p.comment 
-            FROM beesubscribes s
-            LEFT JOIN beeparams p ON s.msg_id = p.msg_id 
-                AND s.tg_id = p.tg_id 
-                AND s.chat_id = p.chat_id
-            WHERE DATE(s.dt) = ? 
-                AND s.tp = 0
-                AND s.sent = 0
-        `, [config.notificationTime, currentMoscowDate]);
-        
-        console.log(`Found ${notifications.length} calendar notifications for today`);
-        
-        let sentCount = 0;
-        let skippedCount = 0;
-        
-        for (const notification of notifications) {
-            // Создаем уникальный ключ для этого уведомления
-            const notifKey = `${notification.id}_${notification.chat_id}`;
-            
-            // Проверяем, не обработали ли мы его уже в этом цикле
-            if (processedToday.has(notifKey)) {
-                console.log(`⏭️ Skipping duplicate notification ${notification.id} for chat ${notification.chat_id}`);
-                skippedCount++;
-                continue;
-            }
-            
-            const notificationTime = notification.subscribetime || '08:00';
-            const [hours, minutes] = notificationTime.split(':');
-            
-            // Сравниваем текущее время с временем уведомления
-            const currentTotalMinutes = currentHour * 60 + currentMinute;
-            const notificationTotalMinutes = parseInt(hours) * 60 + parseInt(minutes);
-            
-            // Отправляем, если текущее время >= времени уведомления
-            // ИЛИ если время уведомления было в течение последних 5 минут (для случая с задержкой)
-            const timeDiff = currentTotalMinutes - notificationTotalMinutes;
-            const shouldSend = timeDiff >= 0 && timeDiff < 5; // Отправляем в течение 5 минут после времени
-            
-            if (shouldSend) {
-                console.log(`📨 Sending calendar notification to chat ${notification.chat_id} (scheduled for ${notificationTime}, current: ${currentTimeFormatted})`);
-                
-                let text = notification.event;
-                if (notification.comment && notification.comment.trim() !== '') {
-                    text += `\n\n<b><i>комментарий</i></b>\n\n${notification.comment}`;
-                } else {
-                    text += `\n\n(комментарий к прививке не указан)`;
-                }
-                
-                // Добавляем пометку о небольшой задержке
-                if (timeDiff > 1) {
-                    text = `⏰ <i>Уведомление с задержкой (${timeDiff} мин.)</i>\n\n${text}`;
-                }
-                
-                try {
-                    const result = await bot.sendMessage(notification.chat_id, text, {
-                        parse_mode: 'HTML',
-                        reply_to_message_id: notification.msg_id
-                    });
-                    
-                    if (result && result.message_id) {
-                        await dbAsync.run(`UPDATE beesubscribes SET sent = 1 WHERE id = ?`, [notification.id]);
-                        processedToday.add(notifKey);
-                        console.log(`✅ Calendar notification sent for chat ${notification.chat_id}`);
-                        sentCount++;
-                    }
-                } catch (error) {
-                    console.error(`❌ Failed to send notification to ${notification.chat_id}:`, error.message);
-                    
-                    // Если бот заблокирован или чат не найден, помечаем как отправленное
-                    if (error.message.includes('bot was blocked') || 
-                        error.message.includes('chat not found') ||
-                        error.message.includes('Forbidden')) {
-                        await dbAsync.run(`UPDATE beesubscribes SET sent = 1 WHERE id = ?`, [notification.id]);
-                        console.log(`⚠️ User inaccessible, notification marked as sent for chat ${notification.chat_id}`);
-                    }
-                }
-            } else if (timeDiff < 0) {
-                // Еще не время
-                console.log(`⏳ Notification for chat ${notification.chat_id} scheduled for ${notificationTime} (will send later)`);
-            } else if (timeDiff >= 5) {
-                // Пропустили более чем на 5 минут - обработаем отдельно
-                console.log(`⚠️ Notification for chat ${notification.chat_id} is ${timeDiff} minutes late, will be handled by missed notifications check`);
-            }
-        }
-        
-        if (sentCount > 0) {
-            console.log(`📬 Sent ${sentCount} notifications (skipped ${skippedCount} duplicates)`);
-        }
-        
-        // Тип 2: Отложенные сообщения (tp=1)
-        const delayedNotifications = await dbAsync.all(`
-            SELECT * FROM beesubscribes 
-            WHERE tp = 1 
-                AND sent = 0
-                AND datetime(dt) <= datetime(?)
-        `, [formatDateTime(moscowNow)]);
-        
-        console.log(`Found ${delayedNotifications.length} delayed messages`);
-        
-        for (const notification of delayedNotifications) {
-            console.log(`📨 Sending delayed message to chat ${notification.chat_id} (scheduled for ${notification.dt})`);
-            
-            try {
-                const result = await bot.sendMessage(notification.chat_id, notification.event, {
-                    parse_mode: 'HTML'
-                });
-                
-                if (result && result.message_id) {
-                    await dbAsync.run(`UPDATE beesubscribes SET sent = 1 WHERE id = ?`, [notification.id]);
-                    console.log(`✅ Delayed message sent for chat ${notification.chat_id}`);
-                }
-            } catch (error) {
-                console.error(`❌ Failed to send delayed message to ${notification.chat_id}:`, error.message);
-                if (error.message.includes('bot was blocked') || error.message.includes('chat not found')) {
-                    await dbAsync.run(`UPDATE beesubscribes SET sent = 1 WHERE id = ?`, [notification.id]);
-                }
-            }
-        }
-        
-        // Очищаем отправленные уведомления старше 7 дней
-        const weekAgo = new Date(moscowNow);
-        weekAgo.setDate(weekAgo.getDate() - 7);
-        const weekAgoStr = formatDate(weekAgo);
-        
-        const deleted = await dbAsync.run(`
-            DELETE FROM beesubscribes 
-            WHERE sent = 1 
-                AND DATE(dt) <= ?
-        `, [weekAgoStr]);
-        
-        if (deleted.changes > 0) {
-            console.log(`🧹 Cleaned up ${deleted.changes} old sent notifications`);
-        }
-        
-    } catch (error) {
-        console.error('❌ Error in notification scheduler:', error);
-    }
-}
-
-// Экспортируем также функцию для ручного вызова (для отладки)
 module.exports = { initScheduler, checkMissedNotifications };

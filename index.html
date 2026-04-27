@@ -5,29 +5,203 @@
     <title>Bee Telegram Bot - Мониторинг</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            background: #1e1e2e; 
+            padding: 20px; 
+            color: #cdd6f4;
+        }
         .container { max-width: 1400px; margin: 0 auto; }
-        h1 { color: #333; margin-bottom: 20px; border-bottom: 2px solid #f0a500; padding-bottom: 10px; }
-        .section { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .section h2 { color: #666; margin-bottom: 15px; font-size: 18px; }
+        h1 { color: #89b4fa; margin-bottom: 20px; border-bottom: 2px solid #89b4fa; padding-bottom: 10px; }
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #313244;
+        }
+        .tab {
+            padding: 10px 20px;
+            background: #313244;
+            cursor: pointer;
+            border-radius: 8px 8px 0 0;
+            transition: all 0.2s;
+            color: #cdd6f4;
+        }
+        .tab:hover { background: #45475a; }
+        .tab.active {
+            background: #89b4fa;
+            color: #1e1e2e;
+        }
+        
+        .section {
+            display: none;
+            background: #181825;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        .section.active { display: block; }
+        .section h2 { color: #89b4fa; margin-bottom: 15px; font-size: 18px; }
+        
         table { width: 100%; border-collapse: collapse; }
-        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #eee; }
-        th { background: #f8f9fa; font-weight: 600; color: #555; }
-        tr:hover { background: #fafafa; }
-        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
-        .badge-bot { background: #e8f5e9; color: #2e7d32; }
-        .badge-user { background: #e3f2fd; color: #1565c0; }
-        .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-        .status-online { background: #4caf50; box-shadow: 0 0 4px #4caf50; }
-        .refresh-btn { padding: 8px 16px; background: #f0a500; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 15px; color: white; font-weight: 500; }
-        .refresh-btn:hover { background: #e09600; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #313244; }
+        th { background: #1e1e2e; font-weight: 600; color: #89b4fa; }
+        tr:hover { background: #313244; }
+        
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        .badge-bot { background: #a6e3a1; color: #1e1e2e; }
+        .badge-user { background: #89b4fa; color: #1e1e2e; }
+        
+        .status {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+        .status-online { background: #a6e3a1; box-shadow: 0 0 4px #a6e3a1; }
+        
+        .refresh-btn {
+            padding: 8px 16px;
+            background: #89b4fa;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 15px;
+            color: #1e1e2e;
+            font-weight: 500;
+        }
+        .refresh-btn:hover { background: #74a7f0; }
+        
+        /* Логи */
+        .log-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        .log-btn {
+            padding: 6px 12px;
+            background: #313244;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            color: #cdd6f4;
+            font-size: 12px;
+        }
+        .log-btn:hover { background: #45475a; }
+        .log-btn.danger:hover { background: #f38ba8; color: #1e1e2e; }
+        
+        .log-filters {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        .filter-btn {
+            padding: 4px 10px;
+            background: #313244;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            color: #cdd6f4;
+            font-size: 12px;
+        }
+        .filter-btn.active {
+            background: #89b4fa;
+            color: #1e1e2e;
+        }
+        
+        .log-container {
+            background: #11111b;
+            border-radius: 8px;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            height: 500px;
+            overflow-y: auto;
+        }
+        .log-entry {
+            padding: 4px 8px;
+            border-bottom: 1px solid #313244;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-entry.info { color: #cdd6f4; }
+        .log-entry.warn { color: #f9e2af; background: rgba(249, 226, 175, 0.1); }
+        .log-entry.error { color: #f38ba8; background: rgba(243, 139, 168, 0.1); }
+        .log-entry.debug { color: #94e2d5; }
+        
+        .log-timestamp {
+            color: #6c7086;
+            margin-right: 10px;
+        }
+        .log-level {
+            display: inline-block;
+            min-width: 55px;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        .log-level.info { color: #89b4fa; }
+        .log-level.warn { color: #f9e2af; }
+        .log-level.error { color: #f38ba8; }
+        .log-level.debug { color: #94e2d5; }
+        
+        .log-stack {
+            margin-left: 125px;
+            padding: 4px 8px;
+            background: #1e1e2e;
+            border-radius: 4px;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #6c7086;
+            white-space: pre-wrap;
+        }
+        
+        .auto-scroll {
+            margin-left: auto;
+        }
+        
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1e1e2e;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #313244;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #45475a;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🐝 Bee Telegram Bot - Мониторинг</h1>
         
-        <div class="section">
+        <div class="tabs">
+            <div class="tab" data-tab="users">👥 Пользователи</div>
+            <div class="tab" data-tab="params">📊 Расчеты</div>
+            <div class="tab" data-tab="notifications">🔔 Уведомления</div>
+            <div class="tab" data-tab="delayed">⏰ Отложенные</div>
+            <div class="tab" data-tab="logs">📋 Консоль</div>
+        </div>
+        
+        <!-- Вкладка Пользователи -->
+        <div id="users-section" class="section">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                 <h2>👥 Пользователи</h2>
                 <button class="refresh-btn" onclick="refreshData()">Обновить</button>
@@ -35,7 +209,7 @@
             <div style="margin-bottom: 10px;">
                 <span class="status status-online"></span> Бот работает
             </div>
-            <table id="usersTable">
+            <table>
                 <thead>
                     <tr><th>ID</th><th>Telegram ID</th><th>Имя</th><th>Username</th><th>Тип</th><th>Последнее сообщение</th></tr>
                 </thead>
@@ -43,81 +217,259 @@
             </table>
         </div>
         
-        <div class="section">
+        <!-- Вкладка Расчеты -->
+        <div id="params-section" class="section">
             <h2>📊 Последние расчеты</h2>
-            <table id="paramsTable">
+            <table>
                 <thead><tr><th>ID</th><th>Chat ID</th><th>Тип</th><th>Яйцо/личинка</th><th>Дата</th><th>Уведомления</th></tr></thead>
                 <tbody id="paramsBody"></tbody>
             </table>
         </div>
-<div class="section">
-    <h2>🔔 Ожидающие уведомления</h2>
-    <table id="notificationsTable">
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Chat ID</th>
-                <th>Дата/время</th>
-                <th>Тип</th>
-                <th>Событие</th>
-            </tr>
-        </thead>
-        <tbody id="notificationsBody"></tbody>
-    </table>
-</div>        
+        
+        <!-- Вкладка Уведомления -->
+        <div id="notifications-section" class="section">
+            <h2>🔔 Ожидающие уведомления</h2>
+            <table>
+                <thead><tr><th>ID</th><th>Chat ID</th><th>Дата/время</th><th>Тип</th><th>Событие</th></tr></thead>
+                <tbody id="notificationsBody"></tbody>
+            </table>
+        </div>
+
+        <div id="delayed-section" class="section">
+            <h2>⏰ Отложенные сообщения (рассылки)</h2>
+            <div style="margin-bottom: 10px; font-size: 12px; color: #6c7086;">
+                <span>📌 Сообщения с tp=1. Отправляются шедулером с учетом лимитов Telegram.</span>
+            </div>
+            <table>
+                <thead>
+                    <tr><th>ID</th><th>Chat ID</th><th>Имя пользователя</th><th>Дата/время отправки</th><th>Сообщение</th><th>Статус</th></tr>
+                </thead>
+                <tbody id="delayedBody"></tbody>
+            </table>
+        </div>    
+
+        <!-- Вкладка Консоль -->
+        <div id="logs-section" class="section">
+            <h2>📋 Консоль бота</h2>
+            <div class="log-controls">
+                <button class="log-btn" id="clearLogsBtn">🗑️ Очистить</button>
+                <button class="log-btn" id="exportLogsBtn">💾 Экспорт</button>
+                <label class="auto-scroll">
+                    <input type="checkbox" id="autoScrollCheckbox" checked> Авто-скролл
+                </label>
+            </div>
+            <div class="log-filters">
+                <button class="filter-btn active" data-filter="all">📋 Все</button>
+                <button class="filter-btn" data-filter="error">❌ Ошибки</button>
+                <button class="filter-btn" data-filter="warn">⚠️ Предупреждения</button>
+                <button class="filter-btn" data-filter="info">ℹ️ Инфо</button>
+                <button class="filter-btn" data-filter="debug">🐛 Debug</button>
+            </div>
+            <div id="logContainer" class="log-container">
+                <div class="log-entry info">🟢 Загрузка логов...</div>
+            </div>
+        </div>
     </div>
     
     <script>
-    async function refreshData() {
-        try {
-            // Загрузка пользователей
-            const users = await window.electronAPI.getUsers();
-            const usersBody = document.getElementById('usersBody');
-            usersBody.innerHTML = users.map(u => `
-                <tr>
-                    <td>${u.id}</td>
-                    <td>${u.tg_id}</td>
-                    <td>${u.first_name || ''} ${u.last_name || ''}</td>
-                    <td>${u.username || '-'}</td>
-                    <td><span class="badge ${u.is_bot ? 'badge-bot' : 'badge-user'}">${u.is_bot ? 'Бот' : 'Пользователь'}</span></td>
-                    <td>${u.last_message || '-'}</td>
-                </tr>
-            `).join('');
-            
-            // Загрузка параметров
-            const params = await window.electronAPI.getParams();
-            const paramsBody = document.getElementById('paramsBody');
-            const eggNames = ['', '1дн яйцо', '2дн яйцо', '3дн яйцо', '1дн личинка', '2дн личинка', '', '', '', 'запечатанный маточник', 'печатка трутня'];
-            paramsBody.innerHTML = params.map(p => `
-                <tr>
-                    <td>${p.id}</td>
-                    <td>${p.chat_id}</td>
-                    <td>${p.typ === 0 ? '👑 Матка' : '🐝 Трутень'}</td>
-                    <td>${eggNames[p.egg] || p.egg}</td>
-                    <td>${p.dt || '-'}</td>
-                    <td>${p.subscribe === 0 ? '❌ Выкл' : (p.subscribe === 1 ? '📲 День' : '📲 День+1')} ${p.subscribetime || ''}</td>
-                </tr>
-            `).join('');
-            
-            // Загрузка уведомлений
-            const notifications = await window.electronAPI.getNotifications();
-            const notificationsBody = document.getElementById('notificationsBody');
-            notificationsBody.innerHTML = notifications.map(n => `
-                <tr>
-                    <td>${n.id}</td>
-                    <td>${n.chat_id}</td>
-                    <td>${n.dt || '-'}</td>
-                    <td>${n.tp === 0 ? '📅 По расписанию' : '⏰ Отложенное'}</td>
-                    <td><small>${(n.event || '').substring(0, 80)}${(n.event || '').length > 80 ? '...' : ''}</small></td>
-                </tr>
-            `).join('');
-        } catch (err) {
-            console.error('Refresh error:', err);
+        let currentFilter = 'all';
+        let logs = [];
+        let autoScroll = true;
+        
+        // Переключение вкладок
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(`${tabName}-section`).classList.add('active');
+                
+                if (tabName === 'logs') {
+                    renderLogs();
+                }
+            });
+        });
+        
+        // Фильтры логов
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentFilter = btn.dataset.filter;
+                renderLogs();
+            });
+        });
+        
+        // Авто-скролл
+        const autoScrollCheckbox = document.getElementById('autoScrollCheckbox');
+        if (autoScrollCheckbox) {
+            autoScrollCheckbox.addEventListener('change', (e) => {
+                autoScroll = e.target.checked;
+            });
         }
-    }
-    
-    refreshData();
-    setInterval(refreshData, 10000);
-</script>
+        
+        // Очистка логов
+        document.getElementById('clearLogsBtn')?.addEventListener('click', async () => {
+            await window.electronAPI.clearLogs();
+            logs = [];
+            renderLogs();
+        });
+        
+        // Экспорт логов
+        document.getElementById('exportLogsBtn')?.addEventListener('click', async () => {
+            const result = await window.electronAPI.exportLogs();
+            if (result.success) {
+                const blob = new Blob([result.content], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `bot-logs-${new Date().toISOString().slice(0, 19)}.log`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } else {
+                console.error('Export failed:', result.error);
+            }
+        });
+        
+        // Отрисовка логов
+        function renderLogs() {
+            const container = document.getElementById('logContainer');
+            if (!container) return;
+            
+            const filteredLogs = currentFilter === 'all' 
+                ? logs 
+                : logs.filter(log => log.level === currentFilter);
+            
+            if (filteredLogs.length === 0) {
+                container.innerHTML = '<div class="log-entry info">📭 Нет сообщений</div>';
+                return;
+            }
+            
+            container.innerHTML = filteredLogs.map(log => {
+                const date = new Date(log.timestamp);
+                const timeStr = date.toLocaleTimeString('ru-RU', { hour12: false });
+                const dateStr = date.toLocaleDateString('ru-RU');
+                
+                let html = `<div class="log-entry ${log.level}">
+                    <span class="log-timestamp">[${dateStr} ${timeStr}]</span>
+                    <span class="log-level ${log.level}">[${log.level.toUpperCase()}]</span>
+                    <span class="log-message">${escapeHtml(log.message)}</span>`;
+                
+                if (log.stack) {
+                    html += `<div class="log-stack">${escapeHtml(log.stack)}</div>`;
+                }
+                
+                html += `</div>`;
+                return html;
+            }).join('');
+            
+            if (autoScroll) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
+        
+        // Получение логов при старте
+        async function loadLogs() {
+            try {
+                logs = await window.electronAPI.getLogs();
+                renderLogs();
+            } catch (err) {
+                console.error('Failed to load logs:', err);
+            }
+        }
+        
+        // Подписка на новые логи
+        window.electronAPI.onLogMessage((logEntry) => {
+            logs.unshift(logEntry);
+            if (logs.length > 1000) logs = logs.slice(0, 1000);
+            if (document.getElementById('logs-section').classList.contains('active')) {
+                renderLogs();
+            }
+        });
+        
+        // Обновление данных (пользователи, расчеты, уведомления)
+        async function refreshData() {
+            try {
+                const users = await window.electronAPI.getUsers();
+                const usersBody = document.getElementById('usersBody');
+                if (usersBody) {
+                    usersBody.innerHTML = users.map(u => `
+                        <tr>
+                            <td>${u.id}</td>
+                            <td>${u.tg_id}</td>
+                            <td>${u.first_name || ''} ${u.last_name || ''}</td>
+                            <td>${u.username || '-'}</td>
+                            <td><span class="badge ${u.is_bot ? 'badge-bot' : 'badge-user'}">${u.is_bot ? 'Бот' : 'Пользователь'}</span></td>
+                            <td>${u.last_message || '-'}</td>
+                        </tr>
+                    `).join('');
+                }
+                
+                const params = await window.electronAPI.getParams();
+                const paramsBody = document.getElementById('paramsBody');
+                const eggNames = ['', '1дн яйцо', '2дн яйцо', '3дн яйцо', '1дн личинка', '2дн личинка', '', '', '', 'запечатанный маточник', 'печатка трутня'];
+                if (paramsBody) {
+                    paramsBody.innerHTML = params.map(p => `
+                        <tr>
+                            <td>${p.id}</td>
+                            <td>${p.chat_id}</td>
+                            <td>${p.typ === 0 ? '👑 Матка' : '🐝 Трутень'}</td>
+                            <td>${eggNames[p.egg] || p.egg}</td>
+                            <td>${p.dt || '-'}</td>
+                            <td>${p.subscribe === 0 ? '❌ Выкл' : (p.subscribe === 1 ? '📲 День' : '📲 День+1')} ${p.subscribetime || ''}</td>
+                        </tr>
+                    `).join('');
+                }
+                
+                const notifications = await window.electronAPI.getNotifications();
+                const notificationsBody = document.getElementById('notificationsBody');
+                if (notificationsBody) {
+                    notificationsBody.innerHTML = notifications.map(n => `
+                        <tr>
+                            <td>${n.id}</td>
+                            <td>${n.chat_id}</td>
+                            <td>${n.dt || '-'}</td>
+                            <td>${n.tp === 0 ? '📅 По расписанию' : '⏰ Отложенное'}</td>
+                            <td><small>${(n.event || '').substring(0, 80)}${(n.event || '').length > 80 ? '...' : ''}</small></td>
+                        </tr>
+                    `).join('');
+                }
+                const delayed = await window.electronAPI.getDelayedMessages();
+                const delayedBody = document.getElementById('delayedBody');
+                if (delayedBody) {
+                    delayedBody.innerHTML = delayed.map(d => `
+                        <tr>
+                            <td>${d.id}</td>
+                            <td>${d.chat_id}</td>
+                            <td>${d.first_name || ''} ${d.username ? '@' + d.username : ''} </td>
+                            <td>${d.dt || '-'}</td>
+                            <td><small title="${escapeHtml(d.event || '')}">${(d.event || '').substring(0, 50)}${(d.event || '').length > 50 ? '...' : ''}</small></td>
+                            <td><span style="color: #f9e2af;">⏳ Ожидает</span></td>
+                        </tr>
+                    `).join('');
+                }
+            } catch (err) {
+                console.error('Refresh error:', err);
+            }
+        }
+        
+        // Функция экранирования HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Загрузка начальных данных
+        loadLogs();
+        refreshData();
+        
+        // Автообновление каждые 10 секунд
+        setInterval(refreshData, 10000);
+        
+        // Активируем первую вкладку
+        document.querySelector('.tab').click();
+    </script>
 </body>
 </html>
